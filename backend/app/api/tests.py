@@ -73,6 +73,33 @@ def start_generation(
     doc_row = db.query(Document).filter(Document.id == doc_id, Document.user_id == current_user.id).first()
     if not doc_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    # Prevent double generation: reject if a run is already pending or in progress for this document
+    existing = (
+        db.query(GeneratedTest)
+        .filter(
+            GeneratedTest.document_id == doc_id,
+            GeneratedTest.user_id == current_user.id,
+            GeneratedTest.status.in_(["pending", "generating"]),
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A generation is already in progress for this document. Wait for it to finish.",
+        )
+    # Require extracted text with minimum word count
+    if not doc_row.extracted_text or not doc_row.extracted_text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document has no extracted text. For PDFs, wait for extraction to complete.",
+        )
+    word_count = len(doc_row.extracted_text.split())
+    if word_count < settings.min_extraction_words:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Document has {word_count} words; at least {settings.min_extraction_words} words required for generation.",
+        )
     test = GeneratedTest(
         user_id=current_user.id,
         document_id=doc_id,

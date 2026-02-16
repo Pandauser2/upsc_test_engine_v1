@@ -31,7 +31,7 @@ def _document_to_response(d: Document) -> DocumentResponse:
 
 
 def _run_pdf_extraction(document_id: uuid.UUID) -> None:
-    """Background task: load document, extract PDF text, update status and extracted_text."""
+    """Background task: load document, extract PDF text, update status and extracted_text. Marks insufficient_text if < min_extraction_words."""
     import logging
     logger = logging.getLogger(__name__)
     from app.database import SessionLocal
@@ -43,7 +43,12 @@ def _run_pdf_extraction(document_id: uuid.UUID) -> None:
         try:
             text = extract_text_from_pdf(doc.file_path)
             doc.extracted_text = text or ""
-            doc.status = "ready"
+            word_count = len(doc.extracted_text.split())
+            if word_count < settings.min_extraction_words:
+                doc.status = "insufficient_text"
+                logger.info("Document %s has %s words (need %s)", document_id, word_count, settings.min_extraction_words)
+            else:
+                doc.status = "ready"
         except Exception as e:
             logger.warning("PDF extraction failed for document %s: %s", document_id, e)
             doc.status = "failed"
@@ -92,7 +97,14 @@ def create_from_paste(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create document from pasted text; no job, status ready immediately."""
+    """Create document from pasted text; no job, status ready immediately. Rejects if fewer than min_extraction_words."""
+    content = (data.content or "").strip()
+    word_count = len(content.split())
+    if word_count < settings.min_extraction_words:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Pasted text has {word_count} words; at least {settings.min_extraction_words} words required.",
+        )
     doc = Document(
         user_id=current_user.id,
         source_type="pasted_text",
@@ -100,7 +112,7 @@ def create_from_paste(
         file_path=None,
         title=data.title,
         status="ready",
-        extracted_text=data.content,
+        extracted_text=content,
     )
     db.add(doc)
     db.commit()

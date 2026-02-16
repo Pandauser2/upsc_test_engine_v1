@@ -76,6 +76,12 @@ def run_generation(test_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUI
             test.status = "failed"
             db.commit()
             return
+        word_count = len(doc.extracted_text.split())
+        if word_count < settings.min_extraction_words:
+            logger.warning("Document %s has %s words; need at least %s", document_id, word_count, settings.min_extraction_words)
+            test.status = "failed"
+            db.commit()
+            return
 
         topic_slugs = get_topic_slugs_for_prompt(db)
         slug_to_id = _slug_to_topic_id(db)

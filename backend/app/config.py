@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     prompt_version: str = "mcq_v1"
     max_generation_time_seconds: int = 300
+    min_extraction_words: int = 500  # Reject PDF/paste with fewer words for generation
 
     # File uploads
     upload_dir: Path = Path("./uploads")
