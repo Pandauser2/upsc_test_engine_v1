@@ -6,6 +6,8 @@
 
 Faculty-facing web app: upload UPSC coaching notes (PDF or paste text) → generate 50 Prelims-style MCQs with answer, explanation, difficulty, and topic. Faculty can review/edit, add questions manually if generation yields &lt;50 (partial), and export to .docx. Tech: Next.js (App Router, TypeScript), FastAPI (Python 3.11), PostgreSQL, BackgroundTasks (no Redis for MVP), abstracted LLM layer.
 
+**Current scope:** This plan runs through **Step 9** (backend + APIs complete). **Step 10** (frontend minimal slice) and **Step 11** (Docker and runbook) are planned for later.
+
 ## Critical Decisions
 
 - **Exactly 50 MCQs per test** — Generate in batches, dedupe (Jaccard/stem), rank (validation heuristic, prefer medium, topic diversity), select best 50; if &lt;50 after max retries → status = partial, notify in-app, allow manual fill.
@@ -62,13 +64,9 @@ Faculty-facing web app: upload UPSC coaching notes (PDF or paste text) → gener
   - [ ] 🟥 GET /tests, GET /tests/{id} (with questions); PATCH /tests/{id}; PATCH /tests/{id}/questions/{qid}; POST /tests/{id}/questions (manual fill); all scoped by user_id.
   - [ ] 🟥 POST /tests/{id}/export → .docx three sections (questions, answer key, explanations); simple clean format.
 
-- [ ] 🟥 **Step 10: Frontend minimal vertical slice**
-  - [ ] 🟥 Login / register pages; store token; api.ts + auth helpers.
-  - [ ] 🟥 Dashboard: list documents (upload PDF + paste text entry points), list tests (status: pending, generating, completed, partial, failed_timeout).
-  - [ ] 🟥 Document flow: upload or paste → see list and status; open document detail.
-  - [ ] 🟥 Test flow: start generation from document → see test in list with status; open test detail (questions, status partial/completed); full edit per question; manual add question for partial; export .docx.
-  - [ ] 🟥 Topics: dropdown for topic_id (from GET /topics) in question edit and manual add.
+---
 
-- [ ] 🟥 **Step 11: Docker and runbook**
-  - [ ] 🟥 docker-compose: Postgres + backend (and optionally frontend) for single-VPS run.
-  - [ ] 🟥 README: how to run locally and with Docker; env vars (DB, JWT, LLM, max_generation_time_seconds=300).
+## Planned for later
+
+- **Step 10: Frontend minimal vertical slice** — Login/register, dashboard, documents (upload/paste/list), tests (list, detail, review/edit, manual add, export), topics dropdown.
+- **Step 11: Docker and runbook** — docker-compose (Postgres + backend, optional frontend), README with run instructions and env vars.
