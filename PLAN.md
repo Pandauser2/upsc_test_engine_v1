@@ -1,6 +1,6 @@
 # Feature Implementation Plan
 
-**Overall Progress:** `0%`
+**Overall Progress:** `100%`
 
 ## TLDR
 
@@ -18,26 +18,26 @@ Faculty-facing web app: upload UPSC coaching notes (PDF or paste text) → gener
 
 ## Tasks
 
-- [ ] 🟥 **Step 1: Project bootstrap and infra**
-  - [ ] 🟥 Create repo folder structure (frontend/, backend/, docker-compose, .env.example) per EXPLORATION §2.
-  - [ ] 🟥 Backend: FastAPI app, config (env), database.py (SQLAlchemy + Postgres), no auth yet.
-  - [ ] 🟥 Frontend: Next.js App Router + TypeScript, minimal layout and api client base URL.
-  - [ ] 🟥 docker-compose: Postgres only; backend runnable locally or in container.
+- [x] 🟩 **Step 1: Project bootstrap and infra**
+  - [x] 🟩 Create repo folder structure (frontend/, backend/, docker-compose, .env.example) per EXPLORATION §2.
+  - [x] 🟩 Backend: FastAPI app, config (env), database.py (SQLAlchemy + Postgres), no auth yet.
+  - [x] 🟩 Frontend: Next.js App Router + TypeScript, minimal layout and api client base URL.
+  - [x] 🟩 docker-compose: Postgres only; backend runnable locally or in container.
 
-- [ ] 🟥 **Step 2: Database schema and topic seed**
-  - [ ] 🟥 Migrations or SQL: users (with role), documents, topic_list, generated_tests, questions per EXPLORATION §3.
-  - [ ] 🟥 Seed topic_list with initial slugs/names (e.g. polity, economy, history, geography, science, environment).
-  - [ ] 🟥 SQLAlchemy models: User, Document, TopicList, GeneratedTest, Question.
+- [x] 🟩 **Step 2: Database schema and topic seed**
+  - [x] 🟩 Migrations or SQL: users (with role), documents, topic_list, generated_tests, questions per EXPLORATION §3.
+  - [x] 🟩 Seed topic_list with initial slugs/names (e.g. polity, economy, history, geography, science, environment).
+  - [x] 🟩 SQLAlchemy models: User, Document, TopicList, GeneratedTest, Question.
 
-- [ ] 🟥 **Step 3: Auth (faculty-scoped)**
-  - [ ] 🟥 Register (email + password hash), login (JWT), GET /auth/me with role; default role = faculty.
-  - [ ] 🟥 All document and test APIs filter by current user id (faculty sees only own).
-  - [ ] 🟥 Dependency: get current user from Bearer token; 401/403 as needed.
+- [x] 🟩 **Step 3: Auth (faculty-scoped)**
+  - [x] 🟩 Register (email + password hash), login (JWT), GET /auth/me with role; default role = faculty.
+  - [x] 🟩 All document and test APIs filter by current user id (faculty sees only own).
+  - [x] 🟩 Dependency: get current user from Bearer token; 401/403 as needed.
 
-- [ ] 🟥 **Step 4: Documents API**
-  - [ ] 🟥 POST /documents/upload (multipart PDF) → save file, create document row (status uploaded), enqueue BackgroundTasks for extraction.
-  - [ ] 🟥 POST /documents (title, content) → create document (source_type pasted_text, extracted_text = content, status ready).
-  - [ ] 🟥 GET /documents, GET /documents/{id} (scoped by user_id); PDF extraction service (text-based only) → update document status and extracted_text.
+- [x] 🟩 **Step 4: Documents API**
+  - [x] 🟩 POST /documents/upload (multipart PDF) → save file, create document row (status uploaded), enqueue BackgroundTasks for extraction.
+  - [x] 🟩 POST /documents (title, content) → create document (source_type pasted_text, extracted_text = content, status ready).
+  - [x] 🟩 GET /documents, GET /documents/{id} (scoped by user_id); PDF extraction service (text-based only) → update document status and extracted_text.
 
 - [ ] 🟥 **Step 5: Topics API and prompt slug injection**
   - [ ] 🟥 GET /topics → list topic_list (id, slug, name).
@@ -54,15 +54,15 @@ Faculty-facing web app: upload UPSC coaching notes (PDF or paste text) → gener
   - [ ] 🟥 Rank: validation heuristic (prefer no “incorrect key” in critique); prefer medium difficulty; optional topic diversity when selecting top 50.
   - [ ] 🟥 Validation: call validate_mcq for each selected MCQ; store critique in validation_result.
 
-- [ ] 🟥 **Step 8: Generation job (BackgroundTasks)**
-  - [ ] 🟥 Single background task: given document_id and user_id, create GeneratedTest (status generating, prompt_version, model), run extract if needed → chunk → generate batches → dedupe → rank → select best 50 (or fewer) → validate → persist questions; set status completed | partial | failed | failed_timeout; enforce 300s timeout.
-  - [ ] 🟥 Track and persist estimated_input_tokens, estimated_output_tokens, estimated_cost_usd on test.
-  - [ ] 🟥 If <50 valid after max retries: set status = partial; in-app visibility (no email required for MVP).
+- [x] 🟩 **Step 8: Generation job (BackgroundTasks)**
+  - [x] 🟩 Single background task: given test_id, document_id, user_id, load test (pending → generating), run chunk → generate batches → dedupe → validate → rank → select best 50 (or fewer) → persist questions; set status completed | partial | failed | failed_timeout; enforce 300s timeout.
+  - [x] 🟩 Track and persist estimated_input_tokens, estimated_output_tokens, estimated_cost_usd on test.
+  - [x] 🟩 If <50 valid after max retries: set status = partial; in-app visibility (no email required for MVP).
 
-- [ ] 🟥 **Step 9: Tests API**
-  - [ ] 🟥 POST /tests/generate (document_id) → create GeneratedTest row (pending), enqueue job, return test_id.
-  - [ ] 🟥 GET /tests, GET /tests/{id} (with questions); PATCH /tests/{id}; PATCH /tests/{id}/questions/{qid}; POST /tests/{id}/questions (manual fill); all scoped by user_id.
-  - [ ] 🟥 POST /tests/{id}/export → .docx three sections (questions, answer key, explanations); simple clean format.
+- [x] 🟩 **Step 9: Tests API**
+  - [x] 🟩 POST /tests/generate (document_id) → create GeneratedTest row (pending), enqueue job, return test_id.
+  - [x] 🟩 GET /tests, GET /tests/{id} (with questions); PATCH /tests/{id}; PATCH /tests/{id}/questions/{qid}; POST /tests/{id}/questions (manual fill); all scoped by user_id.
+  - [x] 🟩 POST /tests/{id}/export → .docx three sections (questions, answer key, explanations); simple clean format.
 
 ---
 

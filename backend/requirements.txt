@@ -1,0 +1,25 @@
+# FastAPI and server
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+
+# Database
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# Config and validation
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# Auth (Step 3)
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# PDF and text
+pypdf2==3.0.1
+
+# LLM (Step 6)
+openai==1.12.0
+
+# Export .docx (Step 9)
+python-docx==1.1.0
