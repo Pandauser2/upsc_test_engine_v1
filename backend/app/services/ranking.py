@@ -1,6 +1,7 @@
 """
 Ranking (MVP): validation-score heuristic (no "incorrect key" in critique), prefer medium difficulty, optional topic diversity.
 """
+from collections import defaultdict
 from typing import Any
 
 
@@ -43,7 +44,27 @@ def rank_mcqs(
 
 def select_top_with_topic_diversity(mcqs: list[dict], n: int = 50) -> list[dict]:
     """
-    Select top n MCQs favouring topic spread: round-robin by topic when possible.
-    Simplified: take first n from already-ranked list; optional future: bucket by topic_tag and interleave.
+    Select top n MCQs with topic diversity: bucket by topic_tag, then round-robin from buckets
+    in deterministic order (topic slug sort) so we don't dominate by one topic.
     """
-    return mcqs[:n]
+    if not mcqs or n <= 0:
+        return []
+    if len(mcqs) <= n:
+        return mcqs
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for m in mcqs:
+        tag = (m.get("topic_tag") or "polity").strip().lower()
+        buckets[tag].append(m)
+    # Deterministic order: sort topic slugs
+    topics_ordered = sorted(buckets.keys())
+    out: list[dict] = []
+    indices = [0] * len(topics_ordered)
+    while len(out) < n and any(indices[i] < len(buckets[topics_ordered[i]]) for i in range(len(topics_ordered))):
+        for i, topic in enumerate(topics_ordered):
+            if len(out) >= n:
+                break
+            bucket = buckets[topic]
+            if indices[i] < len(bucket):
+                out.append(bucket[indices[i]])
+                indices[i] += 1
+    return out

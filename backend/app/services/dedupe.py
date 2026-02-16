@@ -7,8 +7,10 @@ from typing import Callable
 
 
 def _tokenize(s: str) -> set[str]:
-    """Lowercase word tokens (no stemming for MVP)."""
-    return set(re.findall(r"[a-z0-9]+", s.lower()))
+    """Normalize: strip, lowercase, then word tokens (no stemming for MVP)."""
+    if not s or not isinstance(s, str):
+        return set()
+    return set(re.findall(r"[a-z0-9]+", s.strip().lower()))
 
 
 def jaccard(a: set[str], b: set[str]) -> float:
@@ -26,10 +28,21 @@ def stem_overlap_ratio(a: set[str], b: set[str]) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
-def are_duplicate_mcqs(m1: dict, m2: dict, jaccard_threshold: float = 0.45, overlap_threshold: float = 0.5) -> bool:
+# Higher thresholds reduce false-positive dedup (different questions flagged as duplicate).
+JACCARD_THRESHOLD = 0.75
+OVERLAP_THRESHOLD = 0.75
+OPTIONS_JACCARD_THRESHOLD = 0.45
+
+
+def are_duplicate_mcqs(
+    m1: dict,
+    m2: dict,
+    jaccard_threshold: float = JACCARD_THRESHOLD,
+    overlap_threshold: float = OVERLAP_THRESHOLD,
+) -> bool:
     """
     True if two MCQs are likely duplicates: similar stems and/or same fact.
-    Same correct_option + high option overlap also flags.
+    Tokens normalized (strip, lower) before similarity. Same correct_option + high option overlap also flags.
     """
     q1 = _tokenize(m1.get("question", ""))
     q2 = _tokenize(m2.get("question", ""))
@@ -40,7 +53,7 @@ def are_duplicate_mcqs(m1: dict, m2: dict, jaccard_threshold: float = 0.45, over
     if m1.get("correct_option") == m2.get("correct_option"):
         opts1 = _tokenize(" ".join(str(v) for v in (m1.get("options") or {}).values()))
         opts2 = _tokenize(" ".join(str(v) for v in (m2.get("options") or {}).values()))
-        if jaccard(opts1, opts2) >= 0.4:
+        if jaccard(opts1, opts2) >= OPTIONS_JACCARD_THRESHOLD:
             return True
     return False
 

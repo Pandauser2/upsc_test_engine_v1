@@ -63,6 +63,7 @@ class OpenAILLMService:
                 {"role": "user", "content": user_content},
             ],
             temperature=0.3,
+            timeout=60.0,  # Per-request timeout (job enforces 300s total)
         )
         content = response.choices[0].message.content or "[]"
         mcqs = _parse_mcqs_from_response(content)
@@ -82,6 +83,7 @@ class OpenAILLMService:
                 {"role": "user", "content": blob},
             ],
             temperature=0.1,
+            timeout=30.0,
         )
         usage = response.usage
         inp = (usage.prompt_tokens or 0) if usage else 0

@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # File uploads
     upload_dir: Path = Path("./uploads")
 
+    # CORS: comma-separated origins, e.g. http://localhost:3000,https://app.example.com
+    cors_origins: str = "http://localhost:3000"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

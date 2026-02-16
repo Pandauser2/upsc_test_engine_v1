@@ -38,6 +38,14 @@ def _elapsed(start: float) -> float:
     return time.time() - start
 
 
+def _normalize_correct_option(raw: str | None) -> str:
+    """Return one of A, B, C, D for DB constraint."""
+    if not raw:
+        return "A"
+    c = str(raw).strip().upper()[:1]
+    return c if c in ("A", "B", "C", "D") else "A"
+
+
 def run_generation(test_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUID) -> None:
     """
     Background task: load existing test (pending), set generating, run pipeline, persist questions, set final status.
@@ -77,7 +85,8 @@ def run_generation(test_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUI
 
         chunks = chunk_text(doc.extracted_text)
         for chunk in chunks:
-            if _elapsed(start) > settings.max_generation_time_seconds:
+            # Strict 300s cap: check before each chunk
+            if _elapsed(start) >= settings.max_generation_time_seconds:
                 test.status = "failed_timeout"
                 test.estimated_input_tokens = total_input
                 test.estimated_output_tokens = total_output
@@ -96,7 +105,7 @@ def run_generation(test_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUI
                 logger.exception("generate_mcqs failed: %s", e)
                 continue
 
-        if _elapsed(start) > settings.max_generation_time_seconds:
+        if _elapsed(start) >= settings.max_generation_time_seconds:
             test.status = "failed_timeout"
             test.estimated_input_tokens = total_input
             test.estimated_output_tokens = total_output
@@ -116,7 +125,7 @@ def run_generation(test_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUI
         ranked = rank_mcqs(validated, validation_results=validation_by_idx, prefer_medium=True)
         top = select_top_with_topic_diversity(ranked, 50)
 
-        if _elapsed(start) > settings.max_generation_time_seconds:
+        if _elapsed(start) >= settings.max_generation_time_seconds:
             test.status = "failed_timeout"
             test.estimated_input_tokens = total_input
             test.estimated_output_tokens = total_output
@@ -135,16 +144,18 @@ def run_generation(test_id: uuid.UUID, document_id: uuid.UUID, user_id: uuid.UUI
             opts = m.get("options") or {}
             if not isinstance(opts, dict):
                 opts = {}
+            raw_diff = (m.get("difficulty") or "medium").strip().lower()
+            difficulty = raw_diff if raw_diff in ("easy", "medium", "hard") else "medium"
             q = Question(
                 generated_test_id=test.id,
                 sort_order=i,
-                question=m.get("question", ""),
+                question=(m.get("question") or "").strip(),
                 options=opts,
-                correct_option=m.get("correct_option", "A"),
-                explanation=m.get("explanation", ""),
-                difficulty=m.get("difficulty", "medium"),
+                correct_option=_normalize_correct_option(m.get("correct_option")),
+                explanation=(m.get("explanation") or "").strip(),
+                difficulty=difficulty,
                 topic_id=topic_id,
-                validation_result=m.get("validation_result"),
+                validation_result=(m.get("validation_result") or "").strip() or None,
             )
             db.add(q)
 

@@ -195,9 +195,13 @@ def add_question(
     ).first()
     if not test:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
-    next_order = (
-        db.query(Question).filter(Question.generated_test_id == test_id).count() + 1
-    )
+    current_count = db.query(Question).filter(Question.generated_test_id == test_id).count()
+    if current_count >= 50:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Test already has 50 questions; cap enforced.",
+        )
+    next_order = current_count + 1
     q = Question(
         generated_test_id=test_id,
         sort_order=next_order,
