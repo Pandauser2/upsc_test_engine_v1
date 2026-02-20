@@ -3,7 +3,7 @@
 **Status:** Spec locked; ready for implementation planning.  
 **Goal:** Faculty-facing SaaS that turns UPSC coaching notes (PDF) into high-quality Prelims-style MCQs with answer, explanation, and difficulty. Generalizable beyond UPSC: question count and topics are configurable.
 
-**Implementation:** Pipeline is **extract → chunk → generate from text** (no vision path). PDF upload triggers extraction (background); generation uses extracted text, semantic or fixed chunking, LLM per chunk/batch, then aggregate → self-validation drop → simple sort → best N. RAG is optional for a later phase.
+**Implementation:** Pipeline is **extract → chunk → generate from text**. PDF upload triggers extraction (background); generation uses extracted text, semantic or fixed chunking, LLM per chunk/batch, then aggregate → self-validation drop → simple sort → best N. RAG is optional for a later phase.
 
 ---
 
@@ -135,7 +135,7 @@ upsc-test-engine/
 │   │   ├── services/
 │   │   │   ├── auth.py
 │   │   │   ├── pdf_extract.py      # PDF → text
-│   │   │   ├── chunking.py         # text → chunks (for 50 MCQs)
+│   │   │   ├── chunking.py         # text → chunks (for generation)
 │   │   │   ├── mcq_generation.py  # uses LLM service
 │   │   │   ├── validation.py      # self-validation pass
 │   │   │   └── export_docx.py
@@ -145,7 +145,7 @@ upsc-test-engine/
 │   │   │   └── openai_impl.py      # (or anthropic_impl, etc.)
 │   │   ├── prompts/                # Optional: versioned prompt templates (prompt_version in DB)
 │   │   └── jobs/                   # BackgroundTasks first; RQ later if needed
-│   │       └── tasks.py            # run_extraction_and_generation (batches → rank/dedupe → best 50 → validate)
+│   │       └── tasks.py            # run_extraction, run_generation (chunk → LLM → rank/dedupe → best N → validate)
 │   └── tests/
 │
 └── docs/                           # Optional: API spec, runbooks
@@ -206,7 +206,7 @@ CREATE TABLE topic_list (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Generated tests (one per run; status: partial if <50 after max retries; failed_timeout if max_generation_time exceeded)
+-- Generated tests (one per run; status: partial if < N after max retries; failed_timeout if max_generation_time exceeded)
 CREATE TABLE generated_tests (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- faculty_id (owner)
