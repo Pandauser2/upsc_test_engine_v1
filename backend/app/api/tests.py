@@ -1,9 +1,14 @@
 """
-Tests API: generate (create test pending, enqueue job), list, get, PATCH test, PATCH question, POST question (manual fill), export .docx.
-All scoped by current user id.
+Tests API: generate (create test pending, enqueue job), list, get, PATCH test, PATCH question, POST question (manual fill), export .docx, cancel.
+All scoped by current user id. On-read cleanup: stale generating tests are marked failed when user loads test/list.
 """
+import logging
 import uuid
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+
+logger = logging.getLogger(__name__)
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -23,13 +28,24 @@ from app.schemas.test import (
 )
 from app.api.deps import get_current_user
 from app.config import settings
-from app.jobs.tasks import run_generation
+from app.jobs.tasks import run_generation, clear_one_stuck_test_if_stale, cancel_generation
 from app.services.export_docx import build_docx
 
 router = APIRouter(prefix="/tests", tags=["tests"])
 
 
-def _test_to_response(t: GeneratedTest) -> TestResponse:
+def _age_seconds(created_at: datetime) -> float:
+    """Seconds since created_at; works for naive (UTC) or aware datetimes."""
+    now = datetime.now(timezone.utc)
+    c = created_at
+    if c.tzinfo:
+        c = c.astimezone(timezone.utc)
+    else:
+        now = datetime.utcnow()
+    return (now - c).total_seconds()
+
+
+def _test_to_response(t: GeneratedTest, stale: bool = False) -> TestResponse:
     return TestResponse(
         id=str(t.id),
         user_id=str(t.user_id),
@@ -41,7 +57,9 @@ def _test_to_response(t: GeneratedTest) -> TestResponse:
         estimated_input_tokens=t.estimated_input_tokens,
         estimated_output_tokens=t.estimated_output_tokens,
         estimated_cost_usd=t.estimated_cost_usd,
+        failure_reason=getattr(t, "failure_reason", None),
         created_at=t.created_at,
+        stale=stale,
     )
 
 
@@ -73,6 +91,18 @@ def start_generation(
     doc_row = db.query(Document).filter(Document.id == doc_id, Document.user_id == current_user.id).first()
     if not doc_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    # For PDFs: require ready and file_path for vision-based generation
+    if getattr(doc_row, "source_type", None) == "pdf":
+        if getattr(doc_row, "status", None) != "ready":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="PDF document is not ready for generation.",
+            )
+        if not getattr(doc_row, "file_path", None) or not str(doc_row.file_path).strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document has no file path.",
+            )
     # Prevent double generation: reject if a run is already pending or in progress for this document
     existing = (
         db.query(GeneratedTest)
@@ -88,29 +118,22 @@ def start_generation(
             status_code=status.HTTP_409_CONFLICT,
             detail="A generation is already in progress for this document. Wait for it to finish.",
         )
-    # Require extracted text with minimum word count
-    if not doc_row.extracted_text or not doc_row.extracted_text.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Document has no extracted text. For PDFs, wait for extraction to complete.",
-        )
-    word_count = len(doc_row.extracted_text.split())
-    if word_count < settings.min_extraction_words:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Document has {word_count} words; at least {settings.min_extraction_words} words required for generation.",
-        )
     test = GeneratedTest(
         user_id=current_user.id,
         document_id=doc_id,
         title=doc_row.title or doc_row.filename or "Generated test",
         status="pending",
         prompt_version=settings.prompt_version,
-        model=settings.openai_model,
+        model=settings.active_llm_model,
+        generation_metadata={
+            "num_questions": data.num_questions,
+            "difficulty": data.difficulty,
+        },
     )
     db.add(test)
     db.commit()
     db.refresh(test)
+    logger.info("POST /tests/generate: enqueueing run_generation test_id=%s doc_id=%s", test.id, doc_id)
     background_tasks.add_task(run_generation, test.id, doc_id, current_user.id)
     return _test_to_response(test)
 
@@ -122,13 +145,19 @@ def list_tests(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List current user's tests."""
+    """List current user's tests. Stale (generating too long) is set so UI can show 'may have timed out'."""
     limit = min(max(1, limit), 100)
     offset = max(0, offset)
     q = db.query(GeneratedTest).filter(GeneratedTest.user_id == current_user.id)
     total = q.count()
     items = q.order_by(GeneratedTest.created_at.desc()).offset(offset).limit(limit).all()
-    return TestListResponse(items=[_test_to_response(t) for t in items], total=total)
+    max_age = settings.max_generation_time_seconds
+    out = []
+    for t in items:
+        age = _age_seconds(t.created_at)
+        stale = t.status in ("pending", "generating") and age > max_age
+        out.append(_test_to_response(t, stale=stale))
+    return TestListResponse(items=out, total=total)
 
 
 @router.get("/{test_id}", response_model=TestDetailResponse)
@@ -137,16 +166,49 @@ def get_test(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get test with questions; 404 if not owned."""
+    """Get test with questions; 404 if not owned. If test is stuck in generating (older than max_generation_time), mark failed on read so user sees updated status."""
     test = db.query(GeneratedTest).filter(
         GeneratedTest.id == test_id,
         GeneratedTest.user_id == current_user.id,
     ).first()
     if not test:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
+    max_age = settings.max_generation_time_seconds
+    if test.status in ("pending", "generating") and _age_seconds(test.created_at) > max_age:
+        if clear_one_stuck_test_if_stale(test_id, max_age):
+            test = db.query(GeneratedTest).filter(
+                GeneratedTest.id == test_id,
+                GeneratedTest.user_id == current_user.id,
+            ).first()
+    stale = test.status in ("pending", "generating") and _age_seconds(test.created_at) > max_age
     questions = db.query(Question).filter(Question.generated_test_id == test_id).order_by(Question.sort_order).all()
-    base = _test_to_response(test)
+    base = _test_to_response(test, stale=stale)
     return TestDetailResponse(**base.model_dump(), questions=[_question_to_response(q) for q in questions])
+
+
+@router.post("/{test_id}/cancel", response_model=TestResponse)
+def cancel_test(
+    test_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cancel a pending or generating test (mark as failed). No-op if already completed/partial/failed. Improves UX when generation is stuck or user wants to stop."""
+    if not cancel_generation(test_id, current_user.id):
+        test = db.query(GeneratedTest).filter(
+            GeneratedTest.id == test_id,
+            GeneratedTest.user_id == current_user.id,
+        ).first()
+        if not test:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Test is not pending or generating; nothing to cancel.",
+        )
+    test = db.query(GeneratedTest).filter(
+        GeneratedTest.id == test_id,
+        GeneratedTest.user_id == current_user.id,
+    ).first()
+    return _test_to_response(test, stale=False)
 
 
 @router.patch("/{test_id}", response_model=TestResponse)
@@ -215,18 +277,21 @@ def add_question(
   current_user: User = Depends(get_current_user),
   db: Session = Depends(get_db),
 ):
-    """Manual fill: add question to test (for partial tests until 50)."""
+    """Manual fill: add question to test (cap = test's num_questions if set, else 50)."""
     test = db.query(GeneratedTest).filter(
         GeneratedTest.id == test_id,
         GeneratedTest.user_id == current_user.id,
     ).first()
     if not test:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
+    cap = 25
+    if test.generation_metadata and isinstance(test.generation_metadata.get("num_questions"), int):
+        cap = max(1, min(25, test.generation_metadata["num_questions"]))
     current_count = db.query(Question).filter(Question.generated_test_id == test_id).count()
-    if current_count >= 50:
+    if current_count >= cap:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Test already has 50 questions; cap enforced.",
+            detail=f"Test already has {cap} questions; cap enforced.",
         )
     next_order = current_count + 1
     q = Question(

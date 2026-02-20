@@ -4,22 +4,22 @@ Documents are scoped by user_id.
 """
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, Text, BigInteger, DateTime, CheckConstraint, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import String, Text, BigInteger, DateTime, CheckConstraint, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
 from app.database import Base
+from app.models.types import UuidType
 
 
 class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        UuidType(), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+        UuidType(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     source_type: Mapped[str] = mapped_column(String(20), nullable=False)  # pdf | pasted_text
     filename: Mapped[str | None] = mapped_column(String(512), nullable=True)

@@ -5,18 +5,18 @@ Prompt must inject exact slugs; model must output one verbatim to avoid FK error
 import uuid
 from datetime import datetime
 from sqlalchemy import String, Integer, DateTime
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
 from app.database import Base
+from app.models.types import UuidType
 
 
 class TopicList(Base):
     __tablename__ = "topic_list"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        UuidType(), primary_key=True, default=uuid.uuid4
     )
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)

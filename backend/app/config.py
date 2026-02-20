@@ -1,39 +1,59 @@
 """
 Application configuration from environment variables.
-See .env.example for required keys.
+Loads .env from the backend directory so API keys are found regardless of cwd.
 """
 from pathlib import Path
-from pydantic_settings import BaseSettings
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# .env next to backend/ (parent of app/)
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_ENV_FILE = _BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
     """Load and validate config from env."""
 
-    # Database
-    database_url: str = "postgresql://user:password@localhost:5432/upsc_test_engine"
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE if _ENV_FILE.exists() else None,
+        env_file_encoding="utf-8",
+    )
+
+    # Database: sqlite for testing without Docker, postgresql for production
+    database_url: str = "sqlite:///./upsc_dev.db"
 
     # JWT (used from Step 3)
     secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24
 
-    # LLM (used from Step 6)
-    llm_provider: str = "openai"
+    # LLM: default provider is Claude (Anthropic). Set LLM_PROVIDER=openai to use OpenAI.
+    llm_provider: str = "claude"
+    claude_api_key: str = ""
+    claude_model: str = "claude-sonnet-4-20250514"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    openai_base_url: str = ""
+
     prompt_version: str = "mcq_v1"
     max_generation_time_seconds: int = 300
-    min_extraction_words: int = 500  # Reject PDF/paste with fewer words for generation
+    min_extraction_words: int = 500
 
     # File uploads
     upload_dir: Path = Path("./uploads")
 
-    # CORS: comma-separated origins, e.g. http://localhost:3000,https://app.example.com
+    # CORS: comma-separated origins
     cors_origins: str = "http://localhost:3000"
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    debug: bool = False
+
+    @property
+    def active_llm_model(self) -> str:
+        """Model name for the currently configured LLM provider (for display/storage)."""
+        p = (self.llm_provider or "claude").strip().lower()
+        if p == "openai":
+            return self.openai_model
+        return self.claude_model
 
 
 settings = Settings()

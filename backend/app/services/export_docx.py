@@ -23,9 +23,15 @@ def build_docx(test: GeneratedTest, questions: list[Question]) -> BytesIO:
         p = doc.add_paragraph()
         p.add_run(f"Q{q.sort_order}. ").bold = True
         p.add_run(q.question)
-        for opt in ["A", "B", "C", "D"]:
-            val = (q.options or {}).get(opt, "")
-            doc.add_paragraph(f"  {opt}. {val}", style="List Bullet")
+        opts = q.options or []
+        if isinstance(opts, list):
+            for o in opts:
+                if isinstance(o, dict):
+                    doc.add_paragraph(f"  {o.get('label', '')}. {o.get('text', '')}", style="List Bullet")
+        else:
+            for opt in ["A", "B", "C", "D"]:
+                val = opts.get(opt, "")
+                doc.add_paragraph(f"  {opt}. {val}", style="List Bullet")
 
     doc.add_page_break()
     # Section 2: Answer key

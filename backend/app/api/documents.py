@@ -1,24 +1,26 @@
 """
-Documents API: upload PDF (BackgroundTasks extraction), paste text, list, get.
-All scoped by current user id.
+Documents API: PDF upload, list, get by id. Scoped by current user.
+Vision-based generation uses PDF file directly; no text extraction endpoints.
 """
+import logging
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models.user import User
 from app.models.document import Document
-from app.schemas.document import DocumentCreatePaste, DocumentResponse, DocumentListResponse, DocumentDetailResponse
+from app.schemas.document import DocumentResponse, DocumentListResponse, DocumentDetailResponse
 from app.api.deps import get_current_user
-from app.config import settings
-from app.services.pdf_extract import extract_text_from_pdf
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+logger = logging.getLogger(__name__)
 
 
-def _document_to_response(d: Document) -> DocumentResponse:
+def _doc_to_response(d: Document) -> DocumentResponse:
     return DocumentResponse(
         id=str(d.id),
         user_id=str(d.user_id),
@@ -30,94 +32,41 @@ def _document_to_response(d: Document) -> DocumentResponse:
     )
 
 
-def _run_pdf_extraction(document_id: uuid.UUID) -> None:
-    """Background task: load document, extract PDF text, update status and extracted_text. Marks insufficient_text if < min_extraction_words."""
-    import logging
-    logger = logging.getLogger(__name__)
-    from app.database import SessionLocal
-    db = SessionLocal()
-    try:
-        doc = db.query(Document).filter(Document.id == document_id).first()
-        if not doc or doc.source_type != "pdf" or not doc.file_path:
-            return
-        try:
-            text = extract_text_from_pdf(doc.file_path)
-            doc.extracted_text = text or ""
-            word_count = len(doc.extracted_text.split())
-            if word_count < settings.min_extraction_words:
-                doc.status = "insufficient_text"
-                logger.info("Document %s has %s words (need %s)", document_id, word_count, settings.min_extraction_words)
-            else:
-                doc.status = "ready"
-        except Exception as e:
-            logger.warning("PDF extraction failed for document %s: %s", document_id, e)
-            doc.status = "failed"
-            doc.extracted_text = ""
-        db.commit()
-    finally:
-        db.close()
-
-
-@router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 def upload_pdf(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload PDF; save file, create document (status uploaded), enqueue extraction."""
+    """Upload a PDF file. File is saved; document is ready immediately for vision-based MCQ generation."""
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PDF file required")
-    settings.upload_dir.mkdir(parents=True, exist_ok=True)
-    file_id = uuid.uuid4()
-    ext = Path(file.filename).suffix or ".pdf"
-    save_path = settings.upload_dir / f"{file_id}{ext}"
-    with open(save_path, "wb") as f:
-        f.write(file.file.read())
-    size = save_path.stat().st_size
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File must be a PDF")
+    _base = Path(__file__).resolve().parent.parent.parent
+    upload_dir = (settings.upload_dir if settings.upload_dir.is_absolute() else _base / settings.upload_dir).resolve()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    doc_id = uuid.uuid4()
+    safe_name = f"{doc_id}.pdf"
+    file_path = (upload_dir / safe_name).resolve()
+    contents = file.file.read()
+    try:
+        file_path.write_bytes(contents)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to save file: {e}")
     doc = Document(
+        id=doc_id,
         user_id=current_user.id,
         source_type="pdf",
-        filename=file.filename,
-        file_path=str(save_path),
-        file_size_bytes=size,
-        status="uploaded",
+        filename=file.filename or "document.pdf",
+        file_path=str(file_path),
+        file_size_bytes=len(contents),
+        title=file.filename or None,
+        status="ready",
         extracted_text="",
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
-    background_tasks.add_task(_run_pdf_extraction, doc.id)
-    return _document_to_response(doc)
-
-
-@router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
-def create_from_paste(
-    data: DocumentCreatePaste,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Create document from pasted text; no job, status ready immediately. Rejects if fewer than min_extraction_words."""
-    content = (data.content or "").strip()
-    word_count = len(content.split())
-    if word_count < settings.min_extraction_words:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Pasted text has {word_count} words; at least {settings.min_extraction_words} words required.",
-        )
-    doc = Document(
-        user_id=current_user.id,
-        source_type="pasted_text",
-        filename=None,
-        file_path=None,
-        title=data.title,
-        status="ready",
-        extracted_text=content,
-    )
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
-    return _document_to_response(doc)
+    return _doc_to_response(doc)
 
 
 @router.get("", response_model=DocumentListResponse)
@@ -133,7 +82,7 @@ def list_documents(
     q = db.query(Document).filter(Document.user_id == current_user.id)
     total = q.count()
     items = q.order_by(Document.created_at.desc()).offset(offset).limit(limit).all()
-    return DocumentListResponse(items=[_document_to_response(d) for d in items], total=total)
+    return DocumentListResponse(items=[_doc_to_response(d) for d in items], total=total)
 
 
 @router.get("/{document_id}", response_model=DocumentDetailResponse)
@@ -142,12 +91,14 @@ def get_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get one document (with extracted_text); 404 if not found or not owned."""
+    """Get one document by id; includes extracted_text."""
     doc = db.query(Document).filter(
         Document.id == document_id,
         Document.user_id == current_user.id,
     ).first()
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    base = _document_to_response(doc)
-    return DocumentDetailResponse(**base.model_dump(), extracted_text=doc.extracted_text or None)
+    return DocumentDetailResponse(
+        **_doc_to_response(doc).model_dump(),
+        extracted_text=doc.extracted_text,
+    )

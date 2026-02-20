@@ -1,25 +1,32 @@
 # FastAPI and server
-fastapi==0.109.2
-uvicorn[standard]==0.27.1
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
 
 # Database
-sqlalchemy==2.0.25
-psycopg2-binary==2.9.9
-alembic==1.13.1
+sqlalchemy>=2.0.25
+psycopg2-binary>=2.9.9
+alembic>=1.13.0
 
 # Config and validation
-pydantic==2.6.1
-pydantic-settings==2.1.0
+pydantic>=2.6.0
+pydantic-settings>=2.1.0
+email-validator>=2.0.0
 
-# Auth (Step 3)
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
+# Auth
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.0.0
 
-# PDF and text
-pypdf2==3.0.1
+# PDF and text (PyMuPDF for better extraction; PyPDF2 fallback; OCR for image-only pages)
+pymupdf>=1.24.0
+PyPDF2>=3.0.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
 
-# LLM (Step 6)
-openai==1.12.0
+# LLM: Claude (default) and optional OpenAI
+anthropic>=0.39.0
+openai>=1.12.0
+httpx<0.28
+tiktoken>=0.5.0
 
-# Export .docx (Step 9)
-python-docx==1.1.0
+# Export .docx
+python-docx>=1.1.0

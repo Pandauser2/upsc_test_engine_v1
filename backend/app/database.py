@@ -1,5 +1,5 @@
 """
-SQLAlchemy engine and session for PostgreSQL.
+SQLAlchemy engine and session. Supports PostgreSQL and SQLite (for local testing without Docker).
 Sync usage (BackgroundTasks-friendly); scope by user_id for all document/test access.
 """
 from sqlalchemy import create_engine
@@ -7,13 +7,51 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
 
+_is_sqlite = "sqlite" in settings.database_url
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
 engine = create_engine(
     settings.database_url,
-    pool_pre_ping=True,
+    pool_pre_ping=not _is_sqlite,
+    connect_args=_connect_args,
     echo=False,  # Set True for SQL logging during development
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def init_sqlite_db():
+    """When using SQLite: create tables, add missing columns (e.g. failure_reason), seed topic_list. Call once at app startup."""
+    if not _is_sqlite:
+        return
+    # Import all models so they register with Base before create_all
+    from app.models import user, document, generated_test, question, topic_list  # noqa: F401
+    Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    try:
+        # Ensure generated_tests.failure_reason exists (added after initial schema; avoids 500s if Alembic not run)
+        from sqlalchemy import text
+        try:
+            rows = db.execute(text("PRAGMA table_info(generated_tests)")).fetchall()
+            # rows: (cid, name, type, notnull, default, pk)
+            if rows and not any(r[1] == "failure_reason" for r in rows):
+                db.execute(text("ALTER TABLE generated_tests ADD COLUMN failure_reason VARCHAR(512)"))
+                db.commit()
+        except Exception:
+            db.rollback()
+        from app.models.topic_list import TopicList
+        if db.query(TopicList).count() == 0:
+            for slug, name, order in [
+                ("polity", "Polity", 1),
+                ("economy", "Economy", 2),
+                ("history", "History", 3),
+                ("geography", "Geography", 4),
+                ("science", "Science", 5),
+                ("environment", "Environment", 6),
+            ]:
+                db.add(TopicList(slug=slug, name=name, sort_order=order))
+            db.commit()
+    finally:
+        db.close()
 
 
 def get_db():
