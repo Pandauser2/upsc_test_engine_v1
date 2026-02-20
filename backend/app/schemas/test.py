@@ -77,14 +77,14 @@ class QuestionResponse(QuestionPayload):
 
 class TestGenerateRequest(BaseModel):
     document_id: str
-    num_questions: int  # Required, 1–30
-    difficulty: Literal["EASY", "MEDIUM", "HARD"]  # Required; LLM must not decide
+    num_questions: int = 15  # MVP: 1–20, default 15
+    difficulty: Literal["EASY", "MEDIUM", "HARD"] = "MEDIUM"  # LLM must not decide
 
     @field_validator("num_questions")
     @classmethod
     def num_questions_range(cls, v: int) -> int:
-        if v < 1 or v > 30:
-            raise ValueError("num_questions must be between 1 and 30")
+        if v < 1 or v > 20:
+            raise ValueError("num_questions must be between 1 and 20")
         return v
 
 

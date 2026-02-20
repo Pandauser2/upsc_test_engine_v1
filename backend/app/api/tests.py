@@ -78,6 +78,10 @@ def _question_to_response(q: Question) -> QuestionResponse:
     )
 
 
+# Validation message for generation start (EXPLORATION §7.3)
+TARGET_QUESTIONS_RANGE_MSG = "target_questions must be between 1 and 20"
+
+
 @router.post("/generate", response_model=TestResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_generation(
     data: TestGenerateRequest,
@@ -85,24 +89,35 @@ def start_generation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create GeneratedTest (pending), enqueue job, return test_id."""
+    """Create GeneratedTest (pending), enqueue job, return test_id. Validates target_questions 1–20."""
     from app.models.document import Document
+    # Ensure num_questions (target_questions) is set and within 1–20 (EXPLORATION §7.3)
+    nq = getattr(data, "num_questions", None)
+    if nq is None or not isinstance(nq, int) or nq < 1 or nq > 20:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=TARGET_QUESTIONS_RANGE_MSG,
+        )
     doc_id = uuid.UUID(data.document_id)
     doc_row = db.query(Document).filter(Document.id == doc_id, Document.user_id == current_user.id).first()
     if not doc_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    # For PDFs: require ready and file_path for vision-based generation
-    if getattr(doc_row, "source_type", None) == "pdf":
-        if getattr(doc_row, "status", None) != "ready":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="PDF document is not ready for generation.",
-            )
-        if not getattr(doc_row, "file_path", None) or not str(doc_row.file_path).strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Document has no file path.",
-            )
+    if getattr(doc_row, "status", None) == "rejected":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document was rejected (e.g. PDF exceeds 100 pages). Use another document.",
+        )
+    # Require extraction completed (status=ready) and extracted_text for text-based generation
+    if getattr(doc_row, "status", None) != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document is not ready for generation. Wait for extraction to complete (status=ready) or re-upload.",
+        )
+    if not (getattr(doc_row, "extracted_text", None) or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document has no extracted text. Extraction may have failed; check document status.",
+        )
     # Prevent double generation: reject if a run is already pending or in progress for this document
     existing = (
         db.query(GeneratedTest)
@@ -118,6 +133,7 @@ def start_generation(
             status_code=status.HTTP_409_CONFLICT,
             detail="A generation is already in progress for this document. Wait for it to finish.",
         )
+    target_n = max(1, min(20, data.num_questions))
     test = GeneratedTest(
         user_id=current_user.id,
         document_id=doc_id,
@@ -125,6 +141,7 @@ def start_generation(
         status="pending",
         prompt_version=settings.prompt_version,
         model=settings.active_llm_model,
+        target_questions=target_n,
         generation_metadata={
             "num_questions": data.num_questions,
             "difficulty": data.difficulty,
@@ -277,16 +294,17 @@ def add_question(
   current_user: User = Depends(get_current_user),
   db: Session = Depends(get_db),
 ):
-    """Manual fill: add question to test (cap = test's num_questions if set, else 50)."""
+    """Manual fill: add question to test (cap = test target_questions, 1-20)."""
     test = db.query(GeneratedTest).filter(
         GeneratedTest.id == test_id,
         GeneratedTest.user_id == current_user.id,
     ).first()
     if not test:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
-    cap = 25
-    if test.generation_metadata and isinstance(test.generation_metadata.get("num_questions"), int):
-        cap = max(1, min(25, test.generation_metadata["num_questions"]))
+    cap = getattr(test, "target_questions", None)
+    if cap is None and test.generation_metadata and isinstance(test.generation_metadata.get("num_questions"), int):
+        cap = test.generation_metadata["num_questions"]
+    cap = max(1, min(20, cap if cap is not None else 20))
     current_count = db.query(Question).filter(Question.generated_test_id == test_id).count()
     if current_count >= cap:
         raise HTTPException(

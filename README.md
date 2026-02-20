@@ -1,6 +1,6 @@
 # UPSC Test Engine
 
-Faculty-facing SaaS: upload UPSC coaching notes (PDF or paste text) → generate 50 Prelims-style MCQs with answer, explanation, difficulty, and topic. Review/edit, manual fill for partial tests, export to .docx.
+Faculty-facing SaaS: upload UPSC coaching notes (PDF) → extraction runs in background → generate 1–20 Prelims-style MCQs (text pipeline: chunk → LLM → filter/sort). Review/edit, manual fill for partial tests, export to .docx. PDF only; no paste.
 
 **Stack:** Next.js (App Router, TypeScript), FastAPI (Python 3.11), PostgreSQL, BackgroundTasks, abstracted LLM (OpenAI).
 

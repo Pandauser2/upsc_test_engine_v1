@@ -3,30 +3,22 @@
 ## Unreleased
 
 ### Added
-- **Vision-based MCQ generation** — PDF → page images (max 1000px), 3 pages/batch → vision ingest (65s + token throttle) → one-shot MCQ generation → quality-review pass.
-- **POST /tests/generate** — Request now requires `num_questions` (1–30) and `difficulty` (EASY | MEDIUM | HARD). Both stored in `generation_metadata`; difficulty is user-only.
-- **Options 4 or 5** — Questions support 4 or 5 options; labels A–D or A–E. Stored as JSON array `[{"label":"A","text":"..."}, ...]`. Migration 002 allows `correct_option` E.
-- **Strict MCQ validation** — Before DB write: options count 4 or 5, labels sequential, correct_answer in labels. Retry generation once on validation failure; then mark test failed.
-- **PDF upload (no extraction)** — Upload sets document `status=ready` immediately; no background text extraction. Generation uses vision pipeline from PDF path.
-- **Concurrency limit** — Max 3 concurrent generation jobs (semaphore in `run_generation`).
-- **POST /documents/upload** — Multipart PDF upload; file saved; document status `ready` immediately.
-- **failure_reason on tests** — GeneratedTest.failure_reason (nullable, 512 chars). Set when status=failed. Returned in GET /tests, GET /tests/{id}. Migration 003; SQLite init auto-adds column if missing.
-- **Rate limit protection (ingestion)** — 65s sleep after each batch; rolling 60s token window, sleep 20s if >25k. Throttle only between ingestion batches.
-- **Pre-push checks** — backend/scripts/pre_push_checks.py. .gitignore added.
-
-### Removed
-- **Paste-from-text document creation** — POST /documents with JSON or form (title, content) removed. Document creation is PDF upload only.
-- **POST /documents/{id}/re-extract** — Unused; generation uses vision pipeline from PDF file.
-- **GET /documents/{id}/extracted-text** — Unused; no text extraction on upload.
-- **Text extraction pipeline** — pdf_extract, chunking, dedupe, ranking, validation; scripts (run_extraction, clear_stuck_generating); demo/test scripts; junk files; PLAN.md, CODE_REVIEW.md, PEER_REVIEW_ACTIONS.md.
+- **Extraction on upload** — PDF upload creates doc with `status=processing` and enqueues `run_extraction`. Background task runs `extract_hybrid` (pdfplumber + optional OCR), sets `extracted_text` and `status=ready` or `extraction_failed`.
+- **Text-only generation pipeline** — Generation uses `document.extracted_text` → chunking (semantic/fixed per config) → `generate_mcqs_with_rag(..., use_rag=False)` → filter bad critique → sort medium first → persist up to N. No vision path in generation.
+- **GET /documents/{id}/extract** — Returns extracted text, word/char count, optional page_count and extraction metadata; runs extraction on demand if stored text empty.
+- **run_extraction(doc_id, user_id)** — Background task in `app.jobs.tasks`; updates doc `extracted_text` and `status` after PDF extraction.
+- **Chunking config** — `chunk_mode` (semantic | fixed), `chunk_size`, `chunk_overlap_fraction` in config; semantic uses spaCy + 20% overlap per EXPLORATION.
 
 ### Changed
-- **Documents API** — PDF upload only; ready immediately. Generation requires `status=ready` and `file_path`.
-- **Image size** — Page images capped at 1000px (re-render with scaled matrix if >1000px). Batches 3 pages (BATCH_MAX_PAGES=3).
-- **run_generation** — On exception: logger.exception; set failure_reason=str(e)[:512]; _mark_failed. Clear failure_reason when completed.
-- **Export .docx** — Supports options as list `[{label, text}, ...]` or legacy dict.
-- **Integration test** — Creates document via POST /documents/upload (test_minimal.pdf) instead of paste; polls doc status until `ready` before starting generation.
+- **Documents API** — PDF upload only. Upload returns 201 with `status=processing`; extraction runs in background. No paste endpoint.
+- **Generation requirements** — Requires `doc.status=ready` and non-empty `extracted_text`; enforces `min_extraction_words` (default 500). Generation uses text pipeline only.
+- **run_generation** — Reads `extracted_text`, calls `mcq_generation_service.generate_mcqs_with_rag` with `use_rag=False`; filters by BAD_CRITIQUE_SUBSTRINGS; sorts; persists options as dict (LLM text returns `{"A":"...","B":"..."}`).
+- **Startup check** — Validates text pipeline import (`generate_mcqs_with_rag`) instead of vision_mcq.
+
+### Removed
+- **POST /documents (paste)** — Create document from pasted text removed. PDF upload only.
+- **DocumentCreatePaste** — Schema removed from `app.schemas.document`.
+- **Vision from generation path** — `run_generation` no longer calls `generate_mcqs_vision`. Vision code remains in repo (`vision_mcq.py`, `pdf_to_images`) but is not used for generation.
 
 ### Fixed
-- **500 on generate** — SQLite init adds failure_reason column when missing; POST /tests/generate no longer fails on old DBs.
-- **Startup crash** — clear_stuck uses raw SQL only so startup works when failure_reason column does not exist.
+- (None this release)

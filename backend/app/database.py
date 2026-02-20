@@ -32,10 +32,18 @@ def init_sqlite_db():
         from sqlalchemy import text
         try:
             rows = db.execute(text("PRAGMA table_info(generated_tests)")).fetchall()
-            # rows: (cid, name, type, notnull, default, pk)
             if rows and not any(r[1] == "failure_reason" for r in rows):
                 db.execute(text("ALTER TABLE generated_tests ADD COLUMN failure_reason VARCHAR(512)"))
-                db.commit()
+            if rows and not any(r[1] == "target_questions" for r in rows):
+                db.execute(text("ALTER TABLE generated_tests ADD COLUMN target_questions INTEGER NOT NULL DEFAULT 15"))
+            db.commit()
+        except Exception:
+            db.rollback()
+        try:
+            doc_rows = db.execute(text("PRAGMA table_info(documents)")).fetchall()
+            if doc_rows and not any(r[1] == "target_questions" for r in doc_rows):
+                db.execute(text("ALTER TABLE documents ADD COLUMN target_questions INTEGER DEFAULT 15"))
+            db.commit()
         except Exception:
             db.rollback()
         from app.models.topic_list import TopicList

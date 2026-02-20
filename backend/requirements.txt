@@ -16,11 +16,13 @@ email-validator>=2.0.0
 python-jose[cryptography]>=3.3.0
 bcrypt>=4.0.0
 
-# PDF and text (PyMuPDF for better extraction; PyPDF2 fallback; OCR for image-only pages)
+# PDF and text (PyMuPDF, pdfplumber for hybrid extraction; OCR for image-only pages)
 pymupdf>=1.24.0
+pdfplumber>=0.11.0
 PyPDF2>=3.0.0
 pytesseract>=0.3.10
 Pillow>=10.0.0
+spacy>=3.7.0
 
 # LLM: Claude (default) and optional OpenAI
 anthropic>=0.39.0
@@ -30,3 +32,13 @@ tiktoken>=0.5.0
 
 # Export .docx
 python-docx>=1.1.0
+
+# RAG and async/retries
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.0
+tenacity>=8.2.0
+celery>=5.3.0
+redis>=5.0.0
+
+# Tests
+pytest>=7.0.0

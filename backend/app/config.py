@@ -39,8 +39,22 @@ class Settings(BaseSettings):
     max_generation_time_seconds: int = 300
     min_extraction_words: int = 500
 
-    # File uploads
+    # File uploads (MVP: max 100 pages per PDF; reject larger at upload)
     upload_dir: Path = Path("./uploads")
+    max_pdf_pages: int = 100
+
+    # Chunking: semantic (spaCy) or fixed
+    chunk_mode: str = "semantic"
+    chunk_size: int = 1500
+    chunk_overlap_fraction: float = 0.2
+
+    # RAG (MCQ generation)
+    rag_top_k: int = 5
+    rag_embedding_model: str = "all-MiniLM-L6-v2"
+
+    # Celery (optional; use when concurrency or long jobs need a queue)
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/0"
 
     # CORS: comma-separated origins
     cors_origins: str = "http://localhost:3000"

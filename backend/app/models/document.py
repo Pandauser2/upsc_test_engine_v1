@@ -4,7 +4,7 @@ Documents are scoped by user_id.
 """
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, BigInteger, DateTime, CheckConstraint, ForeignKey
+from sqlalchemy import String, Text, BigInteger, Integer, DateTime, CheckConstraint, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -28,6 +28,7 @@ class Document(Base):
     title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="uploaded", index=True)
     extracted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    target_questions: Mapped[int | None] = mapped_column(Integer, nullable=True, default=15)  # 1-20, validated in API
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from anthropic import Anthropic
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import settings
 from app.services.pdf_to_images import pdf_to_base64_images
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 BATCH_MIN_PAGES = 1
 BATCH_MAX_PAGES = 3
-MAX_RETRIES = 2  # 3 attempts total per call
+VISION_LLM_RETRY_ATTEMPTS = 3
 CONCURRENT_BATCH_LIMIT = 3  # semaphore for in-flight batch API calls (we still append sequentially)
 # Token safety: abort Phase 2 if Phase 1 already used >= this fraction of context window
 CONTEXT_WINDOW_TOKENS = 200_000  # Claude Sonnet 4
@@ -48,6 +49,8 @@ Rules:
 
 MCQ_GEN_USER_TEMPLATE = """Generate {num_questions} UPSC Civil Services Prelims MCQs. Difficulty level for this run: {difficulty}.
 
+{topic_slug_instruction}
+
 Ensure questions are distributed across early, middle, and later sections of the document. Do not concentrate questions only on the last section.
 
 Return output strictly in valid JSON.
@@ -68,12 +71,13 @@ JSON Schema:
       ],
       "correct_answer": "A",
       "explanation": "string",
+      "topic_tag": "string (must be exactly one of the allowed slugs above)",
       "concepts_tested": ["optional"]
     }}
   ]
 }}
 
-Each question must have 4 or 5 options with labels A, B, C, D, and optionally E. correct_answer must be one of those labels. Only return JSON."""
+Each question must have 4 or 5 options with labels A, B, C, D, and optionally E. correct_answer must be one of those labels. topic_tag must be exactly one of the allowed slugs (verbatim). Only return JSON."""
 
 REVIEW_USER_TEMPLATE = """Review the generated MCQs for conceptual depth, weak distractors, redundancy, hallucinations, and shallow recall. Rewrite weak questions to improve UPSC-level rigor. Preserve JSON format strictly. Each question must have 4 or 5 options with labels A, B, C, D [, E]. correct_answer must match one option label. Return corrected JSON only."""
 
@@ -93,6 +97,16 @@ def _image_blocks(base64_images: list[str]) -> list[dict]:
     return blocks
 
 
+def _is_retryable_vision(exc: BaseException) -> bool:
+    """Retry on 429 (rate limit) and 5xx-like errors."""
+    msg = str(exc).lower()
+    if "429" in msg or "rate limit" in msg or "rate_limit" in msg:
+        return True
+    if "500" in msg or "502" in msg or "503" in msg or "overloaded" in msg:
+        return True
+    return False
+
+
 def _claude_call_with_retry(
     client: Anthropic,
     model: str,
@@ -101,30 +115,33 @@ def _claude_call_with_retry(
     max_tokens: int,
     context: str,
 ) -> tuple[str, int, int]:
-    """Call client.messages.create with up to MAX_RETRIES retries. Returns (text, input_tokens, output_tokens)."""
-    last_err: Exception | None = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            t0 = time.perf_counter()
-            response = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system or "",
-                messages=messages,
-            )
-            elapsed = time.perf_counter() - t0
-            inp = getattr(response.usage, "input_tokens", 0) or 0
-            out = getattr(response.usage, "output_tokens", 0) or 0
-            text = ""
-            if response.content and len(response.content) > 0:
-                block = response.content[0]
-                text = (getattr(block, "text", None) or "").strip()
-            logger.info("%s: attempt=%s elapsed=%.2fs input_tokens=%s output_tokens=%s", context, attempt + 1, elapsed, inp, out)
-            return (text, inp, out)
-        except Exception as e:
-            last_err = e
-            logger.warning("%s: attempt %s failed: %s", context, attempt + 1, e)
-    raise last_err or RuntimeError("Claude call failed")
+    """Call client.messages.create with tenacity retry (3 attempts, 429/5xx). Returns (text, input_tokens, output_tokens)."""
+
+    @retry(
+        retry=retry_if_exception(_is_retryable_vision),
+        stop=stop_after_attempt(VISION_LLM_RETRY_ATTEMPTS),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        reraise=True,
+    )
+    def _do_call() -> tuple[str, int, int]:
+        t0 = time.perf_counter()
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system or "",
+            messages=messages,
+        )
+        elapsed = time.perf_counter() - t0
+        inp = getattr(response.usage, "input_tokens", 0) or 0
+        out = getattr(response.usage, "output_tokens", 0) or 0
+        text = ""
+        if response.content and len(response.content) > 0:
+            block = response.content[0]
+            text = (getattr(block, "text", None) or "").strip()
+        logger.info("%s elapsed=%.2fs input_tokens=%s output_tokens=%s", context, elapsed, inp, out)
+        return (text, inp, out)
+
+    return _do_call()
 
 
 def _append_assistant_message(messages: list[dict], text: str) -> None:
@@ -132,8 +149,13 @@ def _append_assistant_message(messages: list[dict], text: str) -> None:
     messages.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
 
 
-def _parse_questions_json(raw: str, difficulty_override: str) -> list[dict] | None:
-    """Parse Phase 2/3 JSON. Returns list of MCQ dicts; options as list [{"label":"A","text":"..."}, ...]. difficulty from user (difficulty_override), not model."""
+def _parse_questions_json(
+    raw: str,
+    difficulty_override: str,
+    allowed_topic_slugs: list[str] | None = None,
+) -> list[dict] | None:
+    """Parse Phase 2/3 JSON. Returns list of MCQ dicts; options as list [{"label":"A","text":"..."}, ...].
+    difficulty from user (difficulty_override), not model. topic_tag from model; if not in allowed_topic_slugs, use default (EXPLORATION §8)."""
     raw = raw.strip()
     if raw.startswith("```"):
         lines = raw.split("\n")
@@ -153,6 +175,8 @@ def _parse_questions_json(raw: str, difficulty_override: str) -> list[dict] | No
     diff_lower = difficulty_override.strip().lower()
     if diff_lower not in ("easy", "medium", "hard"):
         diff_lower = "medium"
+    slugs_lower = [s.strip().lower() for s in (allowed_topic_slugs or ["polity"]) if s]
+    default_slug = slugs_lower[0] if slugs_lower else "polity"
     out: list[dict] = []
     for q in questions:
         if not isinstance(q, dict):
@@ -176,13 +200,16 @@ def _parse_questions_json(raw: str, difficulty_override: str) -> list[dict] | No
             correct = "A"
         if correct not in [x["label"] for x in options_list]:
             correct = options_list[0]["label"] if options_list else "A"
+        tag = (str(q.get("topic_tag") or "").strip().lower()) or default_slug
+        if tag not in slugs_lower:
+            tag = default_slug
         out.append({
             "question": str(q.get("question") or ""),
             "options": options_list,
             "correct_option": correct,
             "explanation": str(q.get("explanation") or ""),
             "difficulty": diff_lower,
-            "topic_tag": "polity",
+            "topic_tag": tag,
         })
     return out
 
@@ -219,6 +246,10 @@ def generate_mcqs_vision(
     """
     t_start = time.perf_counter()
     topic_slugs = topic_slugs or ["polity"]
+    topic_slug_instruction = (
+        "topic_tag must be exactly one of (output verbatim, no other value): "
+        + ", ".join(topic_slugs)
+    )
     key = (settings.claude_api_key or "").strip()
     if not key:
         import os
@@ -285,15 +316,19 @@ def generate_mcqs_vision(
     if total_inp >= int(CONTEXT_WINDOW_TOKENS * TOKEN_SAFETY_THRESHOLD):
         raise ValueError("Document too large for model context window")
 
-    # Phase 2: Generate MCQs (full UPSC system prompt)
-    gen_prompt = MCQ_GEN_USER_TEMPLATE.format(num_questions=num_questions, difficulty=diff_normalized)
+    # Phase 2: Generate MCQs (full UPSC system prompt; inject topic slugs per EXPLORATION §0 #19, §8)
+    gen_prompt = MCQ_GEN_USER_TEMPLATE.format(
+        num_questions=num_questions,
+        difficulty=diff_normalized,
+        topic_slug_instruction=topic_slug_instruction,
+    )
     messages.append({"role": "user", "content": [{"type": "text", "text": gen_prompt}]})
     gen_text, inp2, out2 = _claude_call_with_retry(
         client, model, FULL_UPSC_SYSTEM_PROMPT, messages, max_tokens=8192, context="vision_mcq_generate",
     )
     total_inp += inp2
     total_out += out2
-    mcqs = _parse_questions_json(gen_text, diff_for_parse)
+    mcqs = _parse_questions_json(gen_text, diff_for_parse, allowed_topic_slugs=topic_slugs)
     if not mcqs:
         logger.info("vision_mcq_generate: invalid JSON, retrying once")
         messages = messages[:-1]
@@ -303,7 +338,7 @@ def generate_mcqs_vision(
         )
         total_inp += inp2b
         total_out += out2b
-        mcqs = _parse_questions_json(gen_text2, diff_for_parse)
+        mcqs = _parse_questions_json(gen_text2, diff_for_parse, allowed_topic_slugs=topic_slugs)
     if not mcqs:
         raise ValueError("Claude did not return valid MCQ JSON after generation and retry")
 
@@ -316,7 +351,7 @@ def generate_mcqs_vision(
     )
     total_inp += inp3
     total_out += out3
-    reviewed = _parse_questions_json(review_text, diff_for_parse)
+    reviewed = _parse_questions_json(review_text, diff_for_parse, allowed_topic_slugs=topic_slugs)
     if reviewed:
         mcqs = reviewed
 

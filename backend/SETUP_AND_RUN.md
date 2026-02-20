@@ -170,10 +170,10 @@ Leave this terminal open. The API will be at **http://localhost:8000**.
 2. **Register:** `POST /auth/register` — body e.g. `{"email":"you@example.com","password":"yourpassword"}`.
 3. **Login:** `POST /auth/login` — same body → copy the `access_token` from the response.
 4. **Authorize:** Click **Authorize**, paste `Bearer <your_access_token>`, then **Authorize**.
-5. **Upload a PDF:** `POST /documents/upload` — choose a PDF file (must have **at least 500 words** of extractable text for generation).
+5. **Upload a PDF:** `POST /documents/upload` — choose a PDF file. Response has `status=processing`; extraction runs in background.
 6. **Get document ID:** From the upload response, copy `id`.
-7. **Wait for extraction:** Call `GET /documents/{document_id}` until `status` is `ready` (or `extraction_failed`).
-8. **Generate questions:** `POST /tests/generate` — body `{"document_id":"<id>","num_questions":2}`.
+7. **Wait for extraction:** Call `GET /documents/{document_id}` until `status` is `ready` (or `extraction_failed`). Generation only allowed when `ready`.
+8. **Generate questions:** `POST /tests/generate` — body `{"document_id":"<id>","num_questions":2,"difficulty":"MEDIUM"}`. Document must have at least 500 words extracted (config: `MIN_EXTRACTION_WORDS`).
 9. **Get test:** `GET /tests/{test_id}` from the generate response — poll until `status` is `completed` (or `partial`), then read `questions`.
 
 **Note:** Generation requires the document to have at least **500 words** of extracted text (config: `MIN_EXTRACTION_WORDS` in `.env`). If your PDF has less, you’ll get a 400 error. Use a real PDF with plenty of text (e.g. a chapter or article), or for a quick test set `MIN_EXTRACTION_WORDS=200` in `.env` and restart the server.
