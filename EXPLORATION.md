@@ -1,7 +1,9 @@
 # upsc-test-engine — Exploration & Architecture
 
 **Status:** Spec locked; ready for implementation planning.  
-**Goal:** Faculty-facing SaaS that turns UPSC coaching notes (PDF/text) into 50 Prelims-style MCQs with answer, explanation, and difficulty.
+**Goal:** Faculty-facing SaaS that turns UPSC coaching notes (PDF/text) into high-quality Prelims-style MCQs with answer, explanation, and difficulty. Generalizable beyond UPSC: question count and topics are configurable.
+
+**Current implementation note:** Production uses a **vision-based pipeline** (PDF → page images → Claude) for MCQ generation. This document describes the extended spec including text/mixed PDF extraction, semantic chunking, RAG, and rate-limit handling for future phases.
 
 ---
 
@@ -9,15 +11,15 @@
 
 | # | Topic | Decision |
 |---|--------|----------|
-| 1 | Questions per test | **Exactly 50** questions per document (per run). |
-| 2 | Chunking | **Fixed-size chunks**; generate MCQs per chunk and **aggregate until we have 50** (then stop). |
+| 1 | Questions per test | **Configurable** (default 50); user or org setting; aggregate until target then stop. |
+| 2 | Chunking | **Configurable**: **semantic chunking** (spaCy sentences/paragraphs, 20% overlap) preferred; **fixed-size** fallback; **adaptive** for dense PDFs. Generate per chunk and aggregate until target. |
 | 3 | Self-validation | **Yes**: LLM self-critique stored in `validation_result` for faculty review. |
 | 4 | Input sources | **Both**: PDF upload **and** paste text directly. |
 | 5 | Faculty review | **Full edit access**: stem, options, correct answer, explanation, difficulty, topic_id (from topic_list). |
 | 6 | Export .docx | **Three sections**: (1) Questions only, (2) Answer key, (3) Explanations. Simple clean format; no fancy UPSC styling. |
 | 7 | Job queue | **Start with FastAPI BackgroundTasks** (no Redis). Add RQ only if: ≥10 concurrent jobs **or** generation time > 15 seconds. |
 | 8 | Deployment | **Docker Compose on single cloud VPS**. No Kubernetes, no fancy CI/CD for now. |
-| 9 | Topic tag | **Fixed list** from `topic_list` table; FK enforced. LLM and faculty choose from same list. |
+| 9 | Topic tag | **Fixed list** from `topic_list` table (default); **dynamic topics** allowed (e.g. user-defined tags or free-form when configured). FK enforced for fixed list; optional mapping for dynamic. |
 | 10 | Re-run | **Yes**: one document can generate multiple tests (same document → many `GeneratedTest` rows). |
 | 11 | 50-MCQ quality | **Hard guardrail**: Generate in batches → rank or dedupe → select **best 50** (not first 50). Goal: high-quality question set. |
 | 12 | Prompt versioning | **Critical**: Each generated test stores `prompt_version`, `model`, and generation metadata for reproducibility and debugging. |
@@ -65,8 +67,8 @@
          ▼                                ▼                                ▼
 ┌─────────────────┐            ┌─────────────────┐            ┌─────────────────┐
 │   PostgreSQL    │            │ BackgroundTasks │            │  LLM Provider    │
-│   (User,        │            │ (no Redis now;  │            │  (OpenAI /       │
-│   Document,     │            │  RQ if 10+      │            │   Anthropic /    │
+│   (User,        │            │ or Celery+Redis │            │  (OpenAI /       │
+│   Document,     │            │ if conc>5 (§6)  │            │   Anthropic /    │
 │   GeneratedTest,│            │  >15s gen time) │            │   local)         │
 │   Question,     │            │                 │            │                  │
 │   topic_list)   │            │                 │            │                  │
@@ -75,9 +77,9 @@
 
 **Decisions reflected above:**
 - Frontend talks to FastAPI.
-- Input: PDF upload **or** paste text; both produce a document with `extracted_text`.
-- BackgroundTasks (no Redis) → text extraction (or use pasted text) → fixed-size chunking → **generate in batches** → **rank/dedupe** → **select best 50** → self-validation pass → persist. Prompt version + model + cost stored per test.
-- Single abstracted LLM service for generation and self-validation.
+- Input: PDF upload **or** paste text; both produce a document with `extracted_text` (see §4 for extraction enhancements).
+- BackgroundTasks (or Celery + Redis when concurrency >5, §6) → extraction → **semantic or fixed chunking** (§0) → optional RAG retrieval (§5) → **generate in batches** → **rank/dedupe** → **select best N** → self-validation → persist. Prompt version + model + cost stored per test.
+- Single abstracted LLM service with optional multi-provider fallback (§6).
 
 ---
 
@@ -225,18 +227,20 @@ CREATE TABLE generated_tests (
 CREATE INDEX idx_generated_tests_user_id ON generated_tests(user_id);
 CREATE INDEX idx_generated_tests_document_id ON generated_tests(document_id);
 
--- Questions (up to 50 per test; partial test has <50; manual fill can add until 50)
+-- Questions (up to target per test; partial test has fewer; manual fill allowed)
 CREATE TABLE questions (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     generated_test_id   UUID NOT NULL REFERENCES generated_tests(id) ON DELETE CASCADE,
-    sort_order          INT NOT NULL,         -- 1..50 (gaps allowed for manual insert)
+    sort_order          INT NOT NULL,         -- 1..N (gaps allowed for manual insert)
     question            TEXT NOT NULL,
-    options             JSONB NOT NULL,       -- {"A":"...", "B":"...", "C":"...", "D":"..."}
-    correct_option      VARCHAR(1) NOT NULL CHECK (correct_option IN ('A','B','C','D')),
+    options             JSONB NOT NULL,       -- {"A":"...", "B":"...", "C":"...", "D":"..."} or E
+    correct_option      VARCHAR(1) NOT NULL CHECK (correct_option IN ('A','B','C','D','E')),
     explanation         TEXT NOT NULL,
     difficulty          VARCHAR(20) NOT NULL CHECK (difficulty IN ('easy','medium','hard')),
     topic_id            UUID NOT NULL REFERENCES topic_list(id),  -- enforced fixed list
     validation_result   TEXT,                 -- from self-validation pass (critique)
+    source_type         VARCHAR(20),          -- 'text' | 'image' | 'mixed' (extraction origin for this question)
+    quality_score       DECIMAL(5, 4),       -- optional 0–1 score from ranking/validation
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (generated_test_id, sort_order)
@@ -253,14 +257,75 @@ CREATE INDEX idx_questions_topic_id ON questions(topic_id);
 - `generated_tests.status`: **partial** = &lt;50 questions after max retries (notify faculty, allow manual fill); **failed_timeout** = job exceeded max_generation_time_seconds (300).
 - `options` as JSONB: flexible for exactly A–D.
 - `validation_result`: critique from self-validation pass.
+- `questions.source_type`: whether the question was generated from text-extracted content, OCR (image), or mixed.
+- `questions.quality_score`: optional 0–1 score from ranking/validation for analytics and filtering.
 
 ---
 
-## 4. API Contracts (Summary)
+## 4. PDF Extraction Enhancements
+
+**Objective:** Reliably extract content from text-only, image-only, and mixed PDFs so the LLM has full context for conceptual questions.
+
+### Text-only PDFs
+- **Libraries:** pdfplumber or PyMuPDF for extraction.
+- **Preprocessing:** Normalize text (Unicode normalization, strip control chars), collapse repeated whitespace, remove stray page numbers and headers/footers (regex or heuristics).
+- **Output:** Clean full-text per page or document; preserve paragraph boundaries where possible for semantic chunking.
+
+### Image-only PDFs
+- **OCR:** Integrate **pytesseract** (Tesseract). Render each page to image (e.g. PyMuPDF `get_pixmap`), run OCR, concatenate text.
+- **Async:** Detect low text yield; trigger OCR **asynchronously** (background task or queue) so upload response is fast; poll or webhook for completion.
+- **Language:** Configure Tesseract for English (and optional Hindi/regional if needed).
+
+### Mixed PDFs
+- **Hybrid:** Extract text/tables with **pdfplumber** (or PyMuPDF) first. For pages or regions with very low text yield, run **pytesseract** on rendered images.
+- **Structure preservation:** Merge text and OCR output with structure preserved (e.g. tag image-derived content as `[Image: ...]` or keep page order and section markers for outline generation).
+
+### Detection logic
+- **Per-page threshold:** After extraction, check extracted text length per page. If below threshold (e.g. **100 characters**), treat page as image-only and apply OCR for that page.
+- **Configurable:** Threshold and OCR on/off configurable via env or document-level setting (e.g. `force_ocr=true` for known scanned docs).
+
+---
+
+## 5. Context Management for Conceptual Questions
+
+**Objective:** Give the LLM enough global and local context so conceptual (cross-chunk) questions are well-grounded.
+
+### Hierarchical processing
+- **Per-chunk summaries:** Generate a short summary per chunk (e.g. one LLM call per chunk or sliding window). Store summaries with chunk references.
+- **Map-reduce for global context:** Combine chunk summaries into a **global outline or abstract** (single follow-up LLM call or deterministic merge). Use this in the main MCQ prompt so the model “knows” the document’s high-level structure.
+
+### Basic RAG
+- **Embeddings:** Use **sentence-transformers** to embed chunks (or sentences). Store embeddings (e.g. in **FAISS** or PostgreSQL with pgvector) keyed by document/chunk.
+- **Retrieval:** For each question-generation request (or per batch), **retrieve top-k relevant chunks** by similarity; pass retrieved text + optional global summary to the LLM. Reduces truncation and improves relevance.
+
+### Prompt engineering
+- **Document outline:** Extract headings (e.g. from PDF structure or regex on bold/large text); build a short **document outline** and include it in the LLM system or user prompt.
+- **Source references:** In prompts, ask the model to **cite source** (e.g. “Section 2.3” or “page 5”); persist in question metadata or explanation for faculty review.
+
+---
+
+## 6. LLM Rate Limit Handling
+
+**Objective:** Avoid 429s and throttling when concurrency or volume grows.
+
+### Queue upgrade (Celery + Redis)
+- **When:** Upgrade from FastAPI BackgroundTasks to **Celery + Redis** when concurrency &gt;5 or generation time makes polling/visibility important.
+- **Benefits:** Persistent queue, retries, visibility into failed tasks, rate limiting at worker level.
+
+### Batching and backoff
+- **Batch LLM calls:** Where possible, send **multiple questions per prompt** (e.g. generate N MCQs in one request) to reduce round-trips and stay under request-based limits.
+- **Exponential backoff:** Use **tenacity** (or similar) for retries: exponential backoff with jitter on 429 and 5xx; cap max delay and max retries.
+
+### Multi-provider fallback
+- **In llm_service (or equivalent):** Implement **multi-provider fallback**. On repeated 429 (or configurable threshold) from primary (e.g. OpenAI), **switch to Anthropic** (or secondary provider) for the same request or for subsequent requests in the run. Config: primary/secondary provider and API keys; feature flag to enable fallback.
+
+---
+
+## 7. API Contracts (Summary)
 
 Base URL: `http://localhost:8000` (or env `API_BASE_URL`).
 
-### 4.1 Auth
+### 7.1 Auth
 
 | Method | Path | Description | Request | Response |
 |--------|------|-------------|---------|----------|
@@ -276,7 +341,7 @@ Base URL: `http://localhost:8000` (or env `API_BASE_URL`).
 - **Super-admin**: Chain level; can see/manage across tenants. TBD for multi-tenant.  
 For MVP, only **Faculty** is used; every document and generated_test has `user_id` = owning faculty; APIs filter by current user id.
 
-### 4.2 Documents
+### 7.2 Documents
 
 | Method | Path | Description | Request | Response |
 |--------|------|-------------|---------|----------|
@@ -285,7 +350,7 @@ For MVP, only **Faculty** is used; every document and generated_test has `user_i
 | GET    | `/documents`        | List my documents | (query: `?limit=20&offset=0`) | `200` + `{ "items": [...], "total": number }` |
 | GET    | `/documents/{id}`   | Get one document | — | `200` + document (include `extracted_text` or snippet by design) |
 
-### 4.3 Tests (Generated Tests)
+### 7.3 Tests (Generated Tests)
 
 | Method | Path | Description | Request | Response |
 |--------|------|-------------|---------|----------|
@@ -297,13 +362,13 @@ For MVP, only **Faculty** is used; every document and generated_test has `user_i
 | POST   | `/tests/{id}/questions` | **Manual fill**: Add question to test (for partial tests until 50) | Body: QuestionPayload (no id) | `201` + question |
 | POST   | `/tests/{id}/export` | Export to .docx | — | `200` + binary `.docx` (see Export format below) |
 
-### 4.4 Topics (fixed list)
+### 7.4 Topics (fixed list)
 
 | Method | Path | Description | Response |
 |--------|------|-------------|----------|
 | GET    | `/topics` | List all topics (for dropdown, LLM prompt) | `200` + `{ "items": [ { "id": uuid, "slug": string, "name": string } ] }` |
 
-### 4.5 Jobs (optional but recommended)
+### 7.5 Jobs (optional but recommended)
 
 | Method | Path | Description | Response |
 |--------|------|-------------|----------|
@@ -333,7 +398,7 @@ No fancy UPSC/OMR styling.
 
 ---
 
-## 5. LLM Service Abstraction
+## 8. LLM Service Abstraction
 
 **Interface (backend):**
 
@@ -369,9 +434,14 @@ No fancy UPSC/OMR styling.
 - Config: `LLM_PROVIDER=openai`, `OPENAI_API_KEY=...`, model name, max_tokens, `PROMPT_VERSION` (e.g. `mcq_v1`), **max_generation_time_seconds = 300**. When starting a generation run, record prompt_version and model on the test; enforce 300s timeout and set status = failed_timeout if exceeded; accumulate token counts and compute estimated cost before persisting the test.  
 - No LLM calls in HTTP handlers; only in services/background tasks.
 
+**LLM best practices (to implement):**
+- **Version prompts** in code or config (e.g. `prompts/mcq_v1.txt`); store `prompt_version` on each test.
+- **Few-shot examples** in system or user prompt (1–2 example MCQs) to stabilize format and quality.
+- **Source references** in questions (e.g. “Based on Section 2.3”) for traceability and faculty review.
+
 ---
 
-## 6. Risks & Mitigations
+## 9. Risks & Mitigations
 
 | Risk / Topic | Mitigation |
 |--------------|------------|
@@ -379,11 +449,25 @@ No fancy UPSC/OMR styling.
 | **Rate limits / cost** | Limit concurrent BackgroundTasks if needed; backoff on LLM errors; consider cost alerts. |
 | **Auth** | JWT (Bearer); define token expiry in config (e.g. 24h). **Role model**: Faculty (default), Admin, Super-admin; MVP = faculty only, tests/documents scoped to user_id. |
 | **File storage** | Local disk under Docker volume for VPS; same for pasted text (no file). Move to S3 later if needed. |
-| **Generation time** | If >15s or ≥10 concurrent jobs, introduce RQ + Redis per decision #7. |
-| **Topic list** | Single source of truth; **inject exact topic slugs into prompt** and require verbatim output to avoid FK errors. |
+| **Generation time** | If >15s or ≥10 concurrent jobs, introduce Celery + Redis per §6. |
+| **Topic list** | Single source of truth; **inject exact topic slugs into prompt** and require verbatim output to avoid FK errors. Dynamic topics optional. |
+| **Chunking** | Prefer semantic chunking (spaCy, 20% overlap); configurable fixed vs semantic; adaptive for dense PDFs (§0 Decision 2). |
 
 ---
 
-## 7. Next Step
+## 10. Technical Gaps & MVP Priorities
 
-Ready for **implementation plan** (minimal vertical slice task list) and then implementation.
+### Technical gaps (to implement)
+- **Auth:** **JWT** for API auth; token expiry configurable (e.g. 24h). **Argon2** for password hashing (replace bcrypt if not already Argon2).
+- **Logging:** **structlog** (or equivalent) for structured logs (request_id, user_id, document_id, level) to support debugging and observability.
+
+### MVP priorities
+- **Phase 1 (MVP):** Focus on **text and mixed PDFs** first. pdfplumber/PyMuPDF + preprocessing; per-page low-text detection and OCR for mixed. Ensure full context (chunking + optional RAG) for conceptual questions.
+- **Phase 1.1 (OCR):** Add **image-only PDF** support: async OCR with pytesseract; document status “processing” until OCR complete.
+- **Test suite:** Add tests for **diverse PDFs** (text-only, image-only, mixed, poor quality) to guard extraction and generation quality.
+
+---
+
+## 11. Next Step
+
+Ready for **implementation plan** (minimal vertical slice task list) and then implementation. See **§4 PDF Extraction**, **§5 Context Management**, **§6 Rate Limit Handling**, and **§10 MVP Priorities** for phased rollout.
