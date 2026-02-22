@@ -64,7 +64,7 @@ pip install -r requirements.txt
 
 Wait until it finishes. If you see any red error messages, read them; often they say a tool (e.g. Python or pip) is missing or the wrong version.
 
-**Optional — OCR for image-only PDF pages:** If PDFs have pages that are images (e.g. scanned docs, infographics), install Tesseract so the app can run OCR on those pages. On Mac: `brew install tesseract`. Without it, image-only pages yield no text (extraction still works for text-layer pages).
+**Optional — OCR for image-only / bilingual PDF pages:** If PDFs have image-only pages or garbled Hindi text, install **Tesseract** and ensure it is on your PATH. On Mac: `brew install tesseract tesseract-lang` (for Hindi: `hin`). On Linux: `sudo apt install tesseract-ocr tesseract-ocr-hin`. Without it, OCR is skipped and those pages use only the extracted text layer (extraction still works for text-layer pages).
 
 ---
 
@@ -193,14 +193,14 @@ This will: register a new user, create a test PDF if missing, upload it, wait fo
 
 ---
 
-### 5. Optional: OCR for image-only PDFs
+### 5. Optional: OCR for image-only / bilingual (Hindi–English) PDFs
 
-If your PDFs are **scans or image-only pages**, install **Tesseract** so the app can run OCR on those pages:
+If your PDFs have **scans, image-only pages, or garbled Hindi**, install **Tesseract** and ensure the `tesseract` command is on your PATH:
 
-- **Mac:** `brew install tesseract`
-- **Linux:** `sudo apt install tesseract-ocr` (or equivalent)
+- **Mac:** `brew install tesseract tesseract-lang` (includes Hindi; or add language data as needed)
+- **Linux:** `sudo apt install tesseract-ocr tesseract-ocr-hin`
 
-Without Tesseract, image-only pages stay empty; text-layer PDFs work as before. The app does not crash if Tesseract is missing.
+Check with: `tesseract --version`. Without Tesseract, OCR is skipped (you may see a one-time warning); text-layer extraction and mojibake fixes still work.
 
 ---
 

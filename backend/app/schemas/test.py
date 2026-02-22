@@ -79,6 +79,7 @@ class TestGenerateRequest(BaseModel):
     document_id: str
     num_questions: int = 15  # MVP: 1–20, default 15
     difficulty: Literal["EASY", "MEDIUM", "HARD"] = "MEDIUM"  # LLM must not decide
+    export_result: bool = False  # When ENABLE_EXPORT=true, save MCQs to backend/exports/{test_id}.json
 
     @field_validator("num_questions")
     @classmethod
@@ -102,6 +103,11 @@ class TestResponse(BaseModel):
     failure_reason: str | None = None  # set when status is failed
     created_at: datetime
     stale: bool = False  # True when status is pending/generating and older than max_generation_time (UI can show "may have timed out")
+    # Progress when status is pending/generating (batch or parallel)
+    questions_generated: int | None = None
+    target_questions: int | None = None
+    progress: float | None = None  # 0.0–1.0 when generating
+    progress_message: str | None = None  # e.g. "3 of 10 questions created"
 
     class Config:
         from_attributes = True
@@ -114,6 +120,15 @@ class TestDetailResponse(TestResponse):
 class TestListResponse(BaseModel):
     items: list[TestResponse]
     total: int
+
+
+class TestStatusResponse(BaseModel):
+    """Progress for generating test (X of Y questions created)."""
+    status: str
+    progress: float  # questions_generated / target_n, 0.0–1.0
+    message: str
+    questions_generated: int = 0
+    target_questions: int = 0
 
 
 class TestPatchRequest(BaseModel):

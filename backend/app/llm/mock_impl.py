@@ -15,13 +15,16 @@ def _make_mock_mcqs(
     text_chunk: str,
     topic_slugs: list[str],
     num_questions: int,
+    difficulty: str | None = None,
 ) -> list[dict]:
     """Generate deterministic placeholder MCQs; num_questions in 1–25."""
     if not topic_slugs:
         topic_slugs = ["polity"]
     n = max(1, min(25, num_questions))
     seed = hashlib.sha256(text_chunk[:200].encode()).hexdigest()[:8]
-    slug = topic_slugs[0]
+    diff = (difficulty or "medium").strip().lower()
+    if diff not in ("easy", "medium", "hard"):
+        diff = "medium"
     mcqs = []
     for i in range(n):
         slug = topic_slugs[i % len(topic_slugs)]
@@ -35,7 +38,7 @@ def _make_mock_mcqs(
             },
             "correct_option": ["A", "B", "C", "D"][i % 4],
             "explanation": f"Mock explanation for question {i + 1}. Set CLAUDE_API_KEY in .env for real generation.",
-            "difficulty": ["easy", "medium", "hard"][i % 3],
+            "difficulty": diff,
             "topic_tag": slug,
         })
     return mcqs
@@ -49,11 +52,12 @@ class MockLLMService:
         text_chunk: str,
         topic_slugs: list[str],
         num_questions: int | None = None,
+        difficulty: str | None = None,
     ) -> tuple[list[dict], int, int]:
         """Return (placeholder MCQs, fake input tokens, fake output tokens)."""
         n = num_questions if num_questions is not None else DEFAULT_NUM_QUESTIONS
         n = max(1, min(25, n))
-        mcqs = _make_mock_mcqs(text_chunk, topic_slugs, n)
+        mcqs = _make_mock_mcqs(text_chunk, topic_slugs, n, difficulty=difficulty)
         inp = 500 + len(text_chunk) // 4
         out = 800
         return (mcqs, inp, out)

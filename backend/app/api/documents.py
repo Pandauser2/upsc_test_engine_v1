@@ -83,9 +83,9 @@ def _normalize_target_questions(value: int | None) -> int:
 
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 def upload_pdf(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     num_questions: int | None = Form(None),
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

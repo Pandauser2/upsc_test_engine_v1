@@ -48,7 +48,7 @@ def check_init_db():
 def check_clear_stuck():
     from app.jobs.tasks import clear_stuck_generating_tests
     from app.config import settings
-    clear_stuck_generating_tests(max_age_seconds=settings.max_generation_time_seconds)
+    clear_stuck_generating_tests(max_age_seconds=getattr(settings, "max_stale_generation_seconds", 1200))
     return "clear_stuck_generating_tests"
 
 

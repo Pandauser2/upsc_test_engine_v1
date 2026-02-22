@@ -21,6 +21,7 @@ from app.schemas.test import (
     TestResponse,
     TestDetailResponse,
     TestListResponse,
+    TestStatusResponse,
     TestPatchRequest,
     QuestionPayload,
     QuestionResponse,
@@ -46,6 +47,10 @@ def _age_seconds(created_at: datetime) -> float:
 
 
 def _test_to_response(t: GeneratedTest, stale: bool = False) -> TestResponse:
+    target = getattr(t, "target_questions", None) or 0
+    generated = getattr(t, "questions_generated", None) or 0
+    progress = round(generated / target, 2) if target else None
+    progress_message = f"{generated} of {target} questions created" if target else None
     return TestResponse(
         id=str(t.id),
         user_id=str(t.user_id),
@@ -60,6 +65,10 @@ def _test_to_response(t: GeneratedTest, stale: bool = False) -> TestResponse:
         failure_reason=getattr(t, "failure_reason", None),
         created_at=t.created_at,
         stale=stale,
+        questions_generated=generated if target else None,
+        target_questions=target or None,
+        progress=progress,
+        progress_message=progress_message,
     )
 
 
@@ -91,7 +100,7 @@ def start_generation(
 ):
     """Create GeneratedTest (pending), enqueue job, return test_id. Validates target_questions 1–20."""
     from app.models.document import Document
-    # Ensure num_questions (target_questions) is set and within 1–20 (EXPLORATION §7.3)
+    # Ensure num_questions (target_questions) is set and within 1–20; reject target_n > 20
     nq = getattr(data, "num_questions", None)
     if nq is None or not isinstance(nq, int) or nq < 1 or nq > 20:
         raise HTTPException(
@@ -145,6 +154,7 @@ def start_generation(
         generation_metadata={
             "num_questions": data.num_questions,
             "difficulty": data.difficulty,
+            "export_result": getattr(data, "export_result", False),
         },
     )
     db.add(test)
@@ -168,13 +178,47 @@ def list_tests(
     q = db.query(GeneratedTest).filter(GeneratedTest.user_id == current_user.id)
     total = q.count()
     items = q.order_by(GeneratedTest.created_at.desc()).offset(offset).limit(limit).all()
-    max_age = settings.max_generation_time_seconds
+    max_stale = getattr(settings, "max_stale_generation_seconds", 1200)
     out = []
     for t in items:
-        age = _age_seconds(t.created_at)
-        stale = t.status in ("pending", "generating") and age > max_age
+        timeout = (t.generation_metadata or {}).get("stale_timeout_sec") or max_stale
+        age = _age_seconds(t.updated_at or t.created_at)
+        stale = t.status in ("pending", "generating") and age > timeout
         out.append(_test_to_response(t, stale=stale))
     return TestListResponse(items=out, total=total)
+
+
+@router.get("/{test_id}/status", response_model=TestStatusResponse)
+def get_test_status(
+    test_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return status and progress (questions_generated / target_questions). No polling."""
+    test = db.query(GeneratedTest).filter(
+        GeneratedTest.id == test_id,
+        GeneratedTest.user_id == current_user.id,
+    ).first()
+    if not test:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
+    target = getattr(test, "target_questions", 0) or 0
+    generated = getattr(test, "questions_generated", 0) or 0
+    progress = (generated / target) if target else 0.0
+    if test.status in ("pending", "generating") and target > 0:
+        message = f"Generating... usually under 1 minute. {generated} of {target} questions created"
+        timeout = (test.generation_metadata or {}).get("stale_timeout_sec") or getattr(settings, "max_stale_generation_seconds", 1200)
+        age = _age_seconds(test.updated_at or test.created_at)
+        if age > timeout / 2:
+            message += " (this may take a while for large documents)"
+    else:
+        message = f"{generated} of {target} questions created" if target else test.status
+    return TestStatusResponse(
+        status=test.status,
+        progress=round(progress, 2),
+        message=message,
+        questions_generated=generated,
+        target_questions=target,
+    )
 
 
 @router.get("/{test_id}", response_model=TestDetailResponse)
@@ -183,21 +227,23 @@ def get_test(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get test with questions; 404 if not owned. If test is stuck in generating (older than max_generation_time), mark failed on read so user sees updated status."""
+    """Get test with questions; 404 if not owned."""
     test = db.query(GeneratedTest).filter(
         GeneratedTest.id == test_id,
         GeneratedTest.user_id == current_user.id,
     ).first()
     if not test:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
-    max_age = settings.max_generation_time_seconds
-    if test.status in ("pending", "generating") and _age_seconds(test.created_at) > max_age:
-        if clear_one_stuck_test_if_stale(test_id, max_age):
+    max_stale = getattr(settings, "max_stale_generation_seconds", 1200)
+    timeout = (test.generation_metadata or {}).get("stale_timeout_sec") or max_stale
+    age = _age_seconds(test.updated_at or test.created_at)
+    if test.status in ("pending", "generating") and age > timeout:
+        if clear_one_stuck_test_if_stale(test_id, timeout):
             test = db.query(GeneratedTest).filter(
                 GeneratedTest.id == test_id,
                 GeneratedTest.user_id == current_user.id,
             ).first()
-    stale = test.status in ("pending", "generating") and _age_seconds(test.created_at) > max_age
+    stale = test.status in ("pending", "generating") and age > timeout
     questions = db.query(Question).filter(Question.generated_test_id == test_id).order_by(Question.sort_order).all()
     base = _test_to_response(test, stale=stale)
     return TestDetailResponse(**base.model_dump(), questions=[_question_to_response(q) for q in questions])

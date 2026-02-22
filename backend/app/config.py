@@ -31,12 +31,15 @@ class Settings(BaseSettings):
     llm_provider: str = "claude"
     claude_api_key: str = ""
     claude_model: str = "claude-sonnet-4-20250514"
+    claude_timeout_seconds: float = 120.0  # HTTP timeout so requests don't hang
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     openai_base_url: str = ""
 
     prompt_version: str = "mcq_v1"
     max_generation_time_seconds: int = 300
+    # Base stale timeout (seconds). Dynamic timeout = this + (num_chunks // 10 * 60). Used so long runs (e.g. 100-page PDF) aren't marked failed_timeout.
+    max_stale_generation_seconds: int = 1200
     min_extraction_words: int = 500
 
     # File uploads (MVP: max 100 pages per PDF; reject larger at upload)
@@ -48,9 +51,18 @@ class Settings(BaseSettings):
     chunk_size: int = 1500
     chunk_overlap_fraction: float = 0.2
 
-    # RAG (MCQ generation)
+    # RAG (MCQ generation). Default off; enable in env to allow global RAG when doc has enough chunks.
+    use_global_rag: bool = False
+    # Enable global outline + RAG only when chunk count > this (default 9 → 10+ chunks). Protects small-job latency.
+    rag_min_chunks_for_global: int = 9
     rag_top_k: int = 5
     rag_embedding_model: str = "all-MiniLM-L6-v2"
+    # Optional: filter retrieved chunks by L2 distance (keep if distance <= this). ~0.9 ≈ cosine > 0.6.
+    rag_relevance_max_l2: float | None = None
+    # Max chunks to summarize for global outline (caps outline latency).
+    rag_outline_max_chunks: int = 10
+    # Candidates to generate before validation filter; cap at 20 (MVP)
+    mcq_candidate_count: int = 4
 
     # Celery (optional; use when concurrency or long jobs need a queue)
     celery_broker_url: str = "redis://localhost:6379/0"
@@ -58,6 +70,10 @@ class Settings(BaseSettings):
 
     # CORS: comma-separated origins
     cors_origins: str = "http://localhost:3000"
+
+    # Quality baseline: export_result=true + ENABLE_EXPORT=true → save MCQs to exports/{test_id}.json; extra logging
+    enable_export: bool = False
+    exports_dir: Path = Path("./exports")
 
     debug: bool = False
 

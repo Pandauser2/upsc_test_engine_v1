@@ -1,16 +1,18 @@
 """
 MCQ generation service with RAG: sentence_transformers embeddings, FAISS vector store,
-top-k retrieval per prompt, batched LLM calls, self-validation with quality scoring.
+top-k retrieval per prompt. All target_n (1–20) use parallel single Claude calls via
+ThreadPoolExecutor(max_workers=4). No Message Batches.
 """
 import logging
-from typing import Any
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable
 
 import numpy as np
 
 from app.config import settings
 from app.llm import get_llm_service
 from app.services.chunking_service import chunk_text
-from app.services.summarization_service import generate_global_outline, summarize_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +60,9 @@ def retrieve_top_k(
     index: Any,
     chunk_list: list[str],
     k: int | None = None,
+    max_l2_distance: float | None = None,
 ) -> list[str]:
-    """Retrieve top-k chunks by similarity to query. If index is None, return all chunks."""
+    """Retrieve top-k chunks by similarity to query. If index is None, return chunks. Optional max_l2_distance filters by L2 (e.g. 0.9 ≈ cosine > 0.6)."""
     k = k or getattr(settings, "rag_top_k", 5)
     if index is None or not chunk_list:
         return chunk_list[: k * 2] if chunk_list else []
@@ -68,16 +71,22 @@ def retrieve_top_k(
     if model is None:
         return chunk_list[:k]
 
+    max_l2 = max_l2_distance if max_l2_distance is not None else getattr(settings, "rag_relevance_max_l2", None)
     try:
         import faiss
         q = model.encode([query])
         q = np.array(q, dtype=np.float32)
-        distances, indices = index.search(q, min(k, len(chunk_list)))
+        n = min(k * 2 if max_l2 is not None else k, len(chunk_list))
+        distances, indices = index.search(q, n)
         out = []
-        for i in indices[0]:
-            if 0 <= i < len(chunk_list):
-                out.append(chunk_list[i])
-        return out
+        for idx, dist in zip(indices[0], distances[0]):
+            if max_l2 is not None and dist > max_l2:
+                continue
+            if 0 <= idx < len(chunk_list):
+                out.append(chunk_list[idx])
+            if len(out) >= k:
+                break
+        return out[:k] if out else chunk_list[:k]
     except Exception as e:
         logger.warning("FAISS search failed: %s", e)
         return chunk_list[:k]
@@ -104,12 +113,17 @@ def generate_mcqs_with_rag(
     global_outline: str | None = None,
     use_rag: bool = True,
     batch_size: int = 3,
-) -> tuple[list[dict], list[float], int, int]:
+    target_n: int | None = None,
+    difficulty: str | None = None,
+    heartbeat_callback: Callable[[], None] | None = None,
+) -> tuple[list[dict], list[float], int, int, str | None]:
     """
-    Chunk text, optionally build RAG index, retrieve top-k per batch, call LLM in batches.
-    Returns (mcqs, quality_scores, total_input_tokens, total_output_tokens).
-    Each MCQ dict includes validation_result and optional quality_score.
+    Chunk text, then run up to 4 parallel single Claude calls (one per chunk group).
+    difficulty: EASY | MEDIUM | HARD (normalized to easy/medium/hard for LLM).
+    Returns (mcqs, quality_scores, total_input_tokens, total_output_tokens, None).
     """
+    t0 = time.perf_counter()
+    target_n = target_n if target_n is not None else num_questions
     mode = getattr(settings, "chunk_mode", "semantic")
     chunks = chunk_text(
         full_text,
@@ -118,42 +132,71 @@ def generate_mcqs_with_rag(
         overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
     )
     if not chunks:
-        return [], [], 0, 0
+        logger.warning("generate_mcqs_with_rag: no chunks produced")
+        return [], [], 0, 0, None
 
+    logger.info("generate_mcqs_with_rag: chunks=%s num_questions=%s target_n=%s", len(chunks), num_questions, target_n)
+    t_index = time.perf_counter()
     index, chunk_list = build_faiss_index(chunks) if use_rag else (None, chunks)
+    if use_rag:
+        logger.info("generate_mcqs_with_rag: index build %.2fs", time.perf_counter() - t_index)
     top_k = getattr(settings, "rag_top_k", 5)
-
-    # Build context: global outline + retrieved chunks per batch
     outline_prefix = (global_outline or "").strip()
     if outline_prefix:
         outline_prefix = "Document outline:\n" + outline_prefix + "\n\n"
+    _export_enabled = getattr(settings, "enable_export", False)
+    if _export_enabled:
+        logger.info("generate_mcqs_with_rag: baseline logging enabled; chunks=%s outline_len=%s", len(chunk_list), len(outline_prefix))
 
+    # Parallel single calls (ThreadPoolExecutor, max_workers=4) for all target_n
+    _normalized_difficulty = (difficulty or "medium").strip().upper()
+    if _normalized_difficulty not in ("EASY", "MEDIUM", "HARD"):
+        _normalized_difficulty = "MEDIUM"
+    _normalized_difficulty = _normalized_difficulty.lower()
     llm = get_llm_service()
     all_mcqs: list[dict] = []
     total_inp, total_out = 0, 0
+    batch_size_use = batch_size
+    n_batches = max(1, (len(chunk_list) + batch_size_use - 1) // batch_size_use)
+    n_per_batch = max(1, num_questions // n_batches)
 
-    # Batch: take up to batch_size chunks per LLM call
-    for start in range(0, len(chunk_list), batch_size):
-        batch_chunks = chunk_list[start : start + batch_size]
+    def _one_batch(start: int) -> tuple[list[dict], int, int]:
+        batch_chunks = chunk_list[start : start + batch_size_use]
         if use_rag and index is not None and len(batch_chunks) == 1:
             query = batch_chunks[0][:500]
-            batch_chunks = retrieve_top_k(query, index, chunk_list, k=top_k)
+            retrieved = retrieve_top_k(query, index, chunk_list, k=top_k)
+            batch_chunks = retrieved if retrieved else batch_chunks
         combined = outline_prefix + "\n\n".join(batch_chunks)
-        n_per_batch = max(1, num_questions // max(1, (len(chunk_list) + batch_size - 1) // batch_size))
+        if _export_enabled:
+            logger.info("generate_mcqs_with_rag: batch start=%s context_len=%s", start, len(combined))
         try:
-            mcqs, inp, out = llm.generate_mcqs(
-                combined,
-                topic_slugs=topic_slugs,
-                num_questions=n_per_batch,
-            )
-            total_inp += inp
-            total_out += out
-            all_mcqs.extend(mcqs)
+            return llm.generate_mcqs(combined, topic_slugs=topic_slugs, num_questions=n_per_batch, difficulty=_normalized_difficulty)
         except Exception as e:
-            logger.warning("LLM batch failed: %s", e)
+            logger.warning("LLM batch failed (start=%s): %s", start, e)
+            return [], 0, 0
 
-    # Self-validation and quality scoring
+    t_loop = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(_one_batch, start): start for start in range(0, len(chunk_list), batch_size_use)}
+        for fut in as_completed(futures):
+            try:
+                mcqs, inp, out = fut.result()
+                total_inp += inp
+                total_out += out
+                all_mcqs.extend(mcqs)
+                if heartbeat_callback:
+                    try:
+                        heartbeat_callback()
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning("Parallel batch future failed: %s", e)
+    elapsed_loop = time.perf_counter() - t_loop
+    logger.info("generate_mcqs_with_rag: candidate loop %.2fs (parallel) mcqs=%s", elapsed_loop, len(all_mcqs))
+
+    # Self-validation and quality scoring (sequential to preserve order; can parallelize later)
     scores: list[float] = []
+    t_val = time.perf_counter()
     for m in all_mcqs:
         try:
             critique, ci, co = llm.validate_mcq(m)
@@ -168,5 +211,8 @@ def generate_mcqs_with_rag(
     for i, m in enumerate(all_mcqs):
         if i < len(scores):
             m["quality_score"] = scores[i]
+    logger.info("generate_mcqs_with_rag: validation loop %.2fs", time.perf_counter() - t_val)
 
-    return all_mcqs, scores, total_inp, total_out
+    elapsed_total = time.perf_counter() - t0
+    logger.info("generate_mcqs_with_rag: total %.2fs mcqs=%s", elapsed_total, len(all_mcqs))
+    return all_mcqs, scores, total_inp, total_out, None

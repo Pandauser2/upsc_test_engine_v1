@@ -19,9 +19,11 @@ bcrypt>=4.0.0
 # PDF and text (PyMuPDF, pdfplumber for hybrid extraction; OCR for image-only pages)
 pymupdf>=1.24.0
 pdfplumber>=0.11.0
+ftfy>=6.1.0
 PyPDF2>=3.0.0
 pytesseract>=0.3.10
 Pillow>=10.0.0
+opencv-python-headless>=4.8.0
 spacy>=3.7.0
 
 # LLM: Claude (default) and optional OpenAI
@@ -34,6 +36,7 @@ tiktoken>=0.5.0
 python-docx>=1.1.0
 
 # RAG and async/retries
+numpy>=1.24.0
 sentence-transformers>=2.2.0
 faiss-cpu>=1.7.0
 tenacity>=8.2.0

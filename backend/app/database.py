@@ -36,6 +36,8 @@ def init_sqlite_db():
                 db.execute(text("ALTER TABLE generated_tests ADD COLUMN failure_reason VARCHAR(512)"))
             if rows and not any(r[1] == "target_questions" for r in rows):
                 db.execute(text("ALTER TABLE generated_tests ADD COLUMN target_questions INTEGER NOT NULL DEFAULT 15"))
+            if rows and not any(r[1] == "questions_generated" for r in rows):
+                db.execute(text("ALTER TABLE generated_tests ADD COLUMN questions_generated INTEGER NOT NULL DEFAULT 0"))
             db.commit()
         except Exception:
             db.rollback()

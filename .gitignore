@@ -35,6 +35,9 @@ backend/*.pdf
 # Uploads (user PDFs)
 backend/uploads/*.pdf
 
+# Quality baseline exports (ENABLE_EXPORT)
+backend/exports/
+
 # OS
 .DS_Store
 Thumbs.db
