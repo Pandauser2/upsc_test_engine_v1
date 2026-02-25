@@ -2,10 +2,13 @@
 SQLAlchemy engine and session. Supports PostgreSQL and SQLite (for local testing without Docker).
 Sync usage (BackgroundTasks-friendly); scope by user_id for all document/test access.
 """
+import logging
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 _is_sqlite = "sqlite" in settings.database_url
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}
@@ -38,8 +41,11 @@ def init_sqlite_db():
                 db.execute(text("ALTER TABLE generated_tests ADD COLUMN target_questions INTEGER NOT NULL DEFAULT 15"))
             if rows and not any(r[1] == "questions_generated" for r in rows):
                 db.execute(text("ALTER TABLE generated_tests ADD COLUMN questions_generated INTEGER NOT NULL DEFAULT 0"))
+            if rows and not any(r[1] == "processed_candidates" for r in rows):
+                db.execute(text("ALTER TABLE generated_tests ADD COLUMN processed_candidates INTEGER NOT NULL DEFAULT 0"))
             db.commit()
-        except Exception:
+        except Exception as e:
+            logger.warning("SQLite init: generated_tests column add failed: %s", e)
             db.rollback()
         try:
             doc_rows = db.execute(text("PRAGMA table_info(documents)")).fetchall()
@@ -48,7 +54,8 @@ def init_sqlite_db():
             if doc_rows and not any(r[1] == "extraction_elapsed_seconds" for r in doc_rows):
                 db.execute(text("ALTER TABLE documents ADD COLUMN extraction_elapsed_seconds INTEGER"))
             db.commit()
-        except Exception:
+        except Exception as e:
+            logger.warning("SQLite init: documents column add failed: %s", e)
             db.rollback()
         from app.models.topic_list import TopicList
         if db.query(TopicList).count() == 0:

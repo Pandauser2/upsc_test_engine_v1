@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     # Database: sqlite for testing without Docker, postgresql for production
     database_url: str = "sqlite:///./upsc_dev.db"
 
-    # JWT (used from Step 3)
+    # Environment: set ENV=production in production; used to enforce SECRET_KEY.
+    env: str = ""
+
+    # JWT (used from Step 3). In production (ENV=production), SECRET_KEY must be set.
     secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24

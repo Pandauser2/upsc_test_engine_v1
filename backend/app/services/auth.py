@@ -24,8 +24,9 @@ def _truncate_to_bytes(s: str, max_bytes: int = BCRYPT_MAX_BYTES) -> bytes:
 
 
 def hash_password(password: str) -> str:
+    """Hash password for storage. Raises ValueError if password is None."""
     if password is None:
-        password = ""
+        raise ValueError("password is required")
     raw = _truncate_to_bytes(password)
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(raw, salt)

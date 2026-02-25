@@ -17,6 +17,7 @@ FastAPI app (Python 3.11): auth, documents, topics, tests, MCQ generation job, .
 
 ## Env (see repo root `.env.example` and `app/config.py`)
 
+- **Production:** Set `ENV=production` and `SECRET_KEY` to a secure value. The app will not start in production with the default `SECRET_KEY`.
 - `DATABASE_URL` — SQLite default `sqlite:///./upsc_dev.db`; Postgres for production.
 - `SECRET_KEY`, `JWT_ALGORITHM`, `JWT_EXPIRE_HOURS` — Auth.
 - `LLM_PROVIDER` — `claude` (default) or `openai`.

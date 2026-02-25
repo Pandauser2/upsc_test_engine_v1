@@ -10,6 +10,9 @@ from typing import Any, Callable
 
 import numpy as np
 
+# FAISS index type (optional import); use type alias for clarity
+FaissIndex: type = Any
+
 from app.config import settings
 from app.llm import get_llm_service
 from app.services.chunking_service import chunk_text
@@ -34,7 +37,7 @@ def _embedding_model():
     return _embedding_model._model
 
 
-def build_faiss_index(chunks: list[str]) -> Any:
+def build_faiss_index(chunks: list[str]) -> tuple[FaissIndex | None, list[str]]:
     """
     Build FAISS index from chunk texts. Returns (index, chunk_list) for later search.
     """
@@ -57,7 +60,7 @@ def build_faiss_index(chunks: list[str]) -> Any:
 
 def retrieve_top_k(
     query: str,
-    index: Any,
+    index: FaissIndex | None,
     chunk_list: list[str],
     k: int | None = None,
     max_l2_distance: float | None = None,
@@ -105,6 +108,24 @@ def quality_score_from_critique(critique: str) -> float:
     return 0.7
 
 
+def _partition_chunks(chunk_list: list[str], n: int) -> list[list[str]]:
+    """Split chunk_list into n contiguous groups (for n parallel candidates)."""
+    if not chunk_list or n <= 0:
+        return [[]] * n if n else []
+    size = len(chunk_list)
+    if n >= size:
+        return [[c] for c in chunk_list] + [[] for _ in range(n - size)]
+    per = size // n
+    remainder = size % n
+    groups: list[list[str]] = []
+    start = 0
+    for i in range(n):
+        take = per + (1 if i < remainder else 0)
+        groups.append(chunk_list[start : start + take])
+        start += take
+    return groups
+
+
 def generate_mcqs_with_rag(
     full_text: str,
     topic_slugs: list[str],
@@ -112,18 +133,20 @@ def generate_mcqs_with_rag(
     *,
     global_outline: str | None = None,
     use_rag: bool = True,
-    batch_size: int = 3,
     target_n: int | None = None,
     difficulty: str | None = None,
     heartbeat_callback: Callable[[], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[list[dict], list[float], int, int, str | None]:
     """
-    Chunk text, then run up to 4 parallel single Claude calls (one per chunk group).
+    Chunk text, then run exactly 4 parallel single Claude calls (one per candidate group).
+    progress_callback(processed_count) called after each of 4 candidates completes (1–4).
     difficulty: EASY | MEDIUM | HARD (normalized to easy/medium/hard for LLM).
     Returns (mcqs, quality_scores, total_input_tokens, total_output_tokens, None).
     """
     t0 = time.perf_counter()
     target_n = target_n if target_n is not None else num_questions
+    candidate_count = max(1, min(20, getattr(settings, "mcq_candidate_count", 4)))
     mode = getattr(settings, "chunk_mode", "semantic")
     chunks = chunk_text(
         full_text,
@@ -135,7 +158,7 @@ def generate_mcqs_with_rag(
         logger.warning("generate_mcqs_with_rag: no chunks produced")
         return [], [], 0, 0, None
 
-    logger.info("generate_mcqs_with_rag: chunks=%s num_questions=%s target_n=%s", len(chunks), num_questions, target_n)
+    logger.info("generate_mcqs_with_rag: chunks=%s num_questions=%s target_n=%s candidates=%s", len(chunks), num_questions, target_n, candidate_count)
     t_index = time.perf_counter()
     index, chunk_list = build_faiss_index(chunks) if use_rag else (None, chunks)
     if use_rag:
@@ -148,51 +171,63 @@ def generate_mcqs_with_rag(
     if _export_enabled:
         logger.info("generate_mcqs_with_rag: baseline logging enabled; chunks=%s outline_len=%s", len(chunk_list), len(outline_prefix))
 
-    # Parallel single calls (ThreadPoolExecutor, max_workers=4) for all target_n
     _normalized_difficulty = (difficulty or "medium").strip().upper()
     if _normalized_difficulty not in ("EASY", "MEDIUM", "HARD"):
         _normalized_difficulty = "MEDIUM"
     _normalized_difficulty = _normalized_difficulty.lower()
     llm = get_llm_service()
-    all_mcqs: list[dict] = []
-    total_inp, total_out = 0, 0
-    batch_size_use = batch_size
-    n_batches = max(1, (len(chunk_list) + batch_size_use - 1) // batch_size_use)
-    n_per_batch = max(1, num_questions // n_batches)
+    groups = _partition_chunks(chunk_list, candidate_count)
+    n_per_candidate = max(1, (num_questions + candidate_count - 1) // candidate_count)
 
-    def _one_batch(start: int) -> tuple[list[dict], int, int]:
-        batch_chunks = chunk_list[start : start + batch_size_use]
-        if use_rag and index is not None and len(batch_chunks) == 1:
-            query = batch_chunks[0][:500]
+    def _one_candidate(idx: int, chunk_group: list[str]) -> tuple[list[dict], int, int]:
+        if not chunk_group:
+            return [], 0, 0
+        if use_rag and index is not None and len(chunk_group) == 1:
+            query = chunk_group[0][:500]
             retrieved = retrieve_top_k(query, index, chunk_list, k=top_k)
-            batch_chunks = retrieved if retrieved else batch_chunks
-        combined = outline_prefix + "\n\n".join(batch_chunks)
+            chunk_group = retrieved if retrieved else chunk_group
+        combined = outline_prefix + "\n\n".join(chunk_group)
         if _export_enabled:
-            logger.info("generate_mcqs_with_rag: batch start=%s context_len=%s", start, len(combined))
+            logger.info("generate_mcqs_with_rag: candidate %s context_len=%s", idx, len(combined))
         try:
-            return llm.generate_mcqs(combined, topic_slugs=topic_slugs, num_questions=n_per_batch, difficulty=_normalized_difficulty)
+            return llm.generate_mcqs(combined, topic_slugs=topic_slugs, num_questions=n_per_candidate, difficulty=_normalized_difficulty)
         except Exception as e:
-            logger.warning("LLM batch failed (start=%s): %s", start, e)
+            logger.warning("LLM candidate %s failed: %s", idx, e)
             return [], 0, 0
 
-    t_loop = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(_one_batch, start): start for start in range(0, len(chunk_list), batch_size_use)}
+    all_mcqs: list[dict] = []
+    total_inp, total_out = 0, 0
+    t_parallel = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=candidate_count) as executor:
+        futures = {executor.submit(_one_candidate, i, groups[i]): i for i in range(candidate_count)}
+        processed = 0
         for fut in as_completed(futures):
             try:
                 mcqs, inp, out = fut.result()
                 total_inp += inp
                 total_out += out
                 all_mcqs.extend(mcqs)
+                processed += 1
+                if progress_callback:
+                    try:
+                        progress_callback(processed)
+                    except Exception:
+                        pass
                 if heartbeat_callback:
                     try:
                         heartbeat_callback()
                     except Exception:
                         pass
             except Exception as e:
-                logger.warning("Parallel batch future failed: %s", e)
-    elapsed_loop = time.perf_counter() - t_loop
-    logger.info("generate_mcqs_with_rag: candidate loop %.2fs (parallel) mcqs=%s", elapsed_loop, len(all_mcqs))
+                logger.warning("Parallel candidate future failed: %s", e)
+                processed += 1
+                if progress_callback:
+                    try:
+                        progress_callback(processed)
+                    except Exception:
+                        pass
+    elapsed_parallel = time.perf_counter() - t_parallel
+    logger.info("generate_mcqs_with_rag: parallel block %.2fs (candidates=%s) mcqs=%s", elapsed_parallel, candidate_count, len(all_mcqs))
 
     # Self-validation and quality scoring (sequential to preserve order; can parallelize later)
     scores: list[float] = []

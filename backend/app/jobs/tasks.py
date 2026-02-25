@@ -116,7 +116,7 @@ def run_extraction(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
                     doc.extracted_text = ""
                     db.commit()
             except Exception:
-                pass
+                logger.debug("run_extraction: failed to mark doc extraction_failed", exc_info=True)
     finally:
         if db:
             db.close()
@@ -141,6 +141,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             logger.warning("run_generation: test %s not found for user %s", test_id, user_id)
             return
         test.status = "generating"
+        test.processed_candidates = 0
         db.commit()
         logger.info("run_generation: status set to generating for test_id=%s", test_id)
 
@@ -189,7 +190,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         else:
             target_n = max(MIN_QUESTIONS, min(MAX_QUESTIONS, int(target_n)))
 
-        candidate_count = _get_candidate_count()  # 4: max parallel workers / batch requests
+        candidate_count = _get_candidate_count()
         num_questions = min(target_n + 2, MAX_QUESTIONS)  # small buffer for validation drop
         meta = test.generation_metadata if isinstance(test.generation_metadata, dict) else {}
         requested_difficulty = (meta.get("difficulty") or "MEDIUM")
@@ -264,6 +265,19 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             finally:
                 _db.close()
 
+        def _update_processed_candidates(count: int) -> None:
+            _db = SessionLocal()
+            try:
+                t = _db.query(GeneratedTest).filter(GeneratedTest.id == test_id).first()
+                if t:
+                    t.processed_candidates = count
+                    _db.commit()
+            except Exception as ex:
+                logger.warning("run_generation: update processed_candidates failed: %s", ex)
+            finally:
+                _db.close()
+
+        candidate_count = _get_candidate_count()
         from app.services.mcq_generation_service import generate_mcqs_with_rag
         t_gen_start = time.monotonic()
         all_mcqs, _scores, total_inp, total_out, _ = generate_mcqs_with_rag(
@@ -275,6 +289,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             global_outline=global_outline_arg,
             difficulty=requested_difficulty,
             heartbeat_callback=_heartbeat,
+            progress_callback=_update_processed_candidates,
         )
         gen_elapsed = time.monotonic() - t_gen_start
         logger.info("run_generation: generate_mcqs_with_rag %.2fs (use_rag=%s)", gen_elapsed, use_rag_flag)
@@ -323,6 +338,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             test.status = "completed" if len(mcqs) >= target_n else "partial"
             test.failure_reason = None
         test.questions_generated = len(mcqs)
+        test.processed_candidates = candidate_count
         test.estimated_input_tokens = total_inp
         test.estimated_output_tokens = total_out
         test.estimated_cost_usd = None
@@ -375,7 +391,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             if t:
                 _mark_failed(_db, t, str(e)[:512] if str(e) else "Unknown error")
         except Exception:
-            pass
+            logger.debug("run_generation: marking test failed after exception", exc_info=True)
         finally:
             if _db is not db:
                 _db.close()
@@ -384,7 +400,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             try:
                 _generation_semaphore.release()
             except Exception:
-                pass
+                logger.debug("run_generation: semaphore release", exc_info=True)
         if db is not None:
             db.close()
 

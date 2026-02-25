@@ -1,6 +1,13 @@
 """
 FastAPI application entrypoint.
 APIs: auth, topics, tests. Run with: uvicorn app.main:app --reload --port 8000
+
+API base path: routes are mounted at root (no /api/v1 prefix).
+  - Auth:  POST /auth/register, POST /auth/login, GET /auth/me
+  - Documents: POST /documents/upload, GET /documents, GET /documents/{id}, ...
+  - Tests: POST /tests/generate, GET /tests, GET /tests/{id}/status, ...
+  - Topics: GET /topics
+
 Celery: optional; set CELERY_BROKER_URL (e.g. redis://localhost:6379/0) and run a worker to use queue.
 Tenacity: LLM retries (429/5xx) are handled in app.llm.llm_service when using get_llm_service_with_fallback().
 """
@@ -39,9 +46,13 @@ app.include_router(tests_router)
 
 @app.on_event("startup")
 def startup():
-    """Init SQLite DB and log LLM key status."""
+    """Init SQLite DB and log LLM key status. Fail fast if production uses default SECRET_KEY."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     _log = logging.getLogger("app.main")
+    if (getattr(settings, "env", "") or "").strip().lower() == "production":
+        if (getattr(settings, "secret_key", "") or "").strip() == "change-me-in-production":
+            _log.critical("SECRET_KEY must be set in production. Set SECRET_KEY in env or .env.")
+            raise RuntimeError("SECRET_KEY must be set in production. Set SECRET_KEY in env or .env.")
     provider = (settings.llm_provider or "claude").strip().lower()
     if provider == "claude":
         key = (settings.claude_api_key or "").strip()

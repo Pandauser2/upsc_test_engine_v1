@@ -1,7 +1,7 @@
 """
 Claude (Anthropic) LLM: real MCQ generation and validation.
 Single-call API only; parallel generation is done by mcq_generation_service (ThreadPoolExecutor).
-Uses CLAUDE_API_KEY or ANTHROPIC_API_KEY. Retries on 429 with exponential backoff 1–8s.
+Uses CLAUDE_API_KEY or ANTHROPIC_API_KEY. Retries on 429 with exponential backoff 1–8s, max 3 attempts.
 """
 import json
 import logging
@@ -92,7 +92,7 @@ Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff
 
         @retry(
             retry=retry_if_exception(_is_rate_limit),
-            stop=stop_after_attempt(4),
+            stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=1, max=8),
             reraise=True,
         )

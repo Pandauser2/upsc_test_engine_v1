@@ -7,7 +7,7 @@ Faculty-facing SaaS: upload UPSC coaching notes (PDF) → extraction runs in bac
 ## Scope (Plan Steps 1–9 done)
 
 - Backend and APIs are implemented through Step 9. Steps 10 (frontend) and 11 (Docker runbook) are planned for later.
-- See `PLAN.md` for task list and `EXPLORATION.md` for architecture and decisions.
+- See **`DOCUMENTATION.md`** for API reference, configuration, and running the app; `PLAN.md` for task list and `EXPLORATION.md` for architecture and decisions.
 
 ## Quick start
 

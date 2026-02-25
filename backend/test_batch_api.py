@@ -1,6 +1,10 @@
-"""Quick test: check if Anthropic message batches API is enabled."""
+"""Quick test: check if Anthropic message batches API is enabled. Dev/CLI script."""
+import logging
 import os
 import anthropic
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 api_key = os.environ.get("ANTHROPIC_API_KEY")
 if not api_key:
@@ -38,4 +42,4 @@ message_batch = client.messages.batches.create(
         },
     ]
 )
-print(message_batch)
+logger.info("Message batch created: %s", message_batch)

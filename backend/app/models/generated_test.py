@@ -37,6 +37,7 @@ class GeneratedTest(Base):
     failure_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)  # set when status=failed
     target_questions: Mapped[int] = mapped_column(Integer, nullable=False, default=15)  # 1-20, from request
     questions_generated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # count persisted (0 until complete)
+    processed_candidates: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 0..candidate_count during generation; "X of N candidates processed"
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
