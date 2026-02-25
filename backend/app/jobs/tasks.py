@@ -210,8 +210,8 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
         )
         num_chunks = len(chunks_for_outline or [])
-        min_chunks = getattr(settings, "rag_min_chunks_for_global", 9)
-        use_global_rag = getattr(settings, "use_global_rag", False)
+        min_chunks = getattr(settings, "rag_min_chunks_for_global", 20)
+        use_global_rag = getattr(settings, "use_global_rag", True)
         global_outline_arg: str | None = None
         use_rag_flag = False
         if use_global_rag and num_chunks > min_chunks:
@@ -227,6 +227,10 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
                 global_outline_arg = generate_global_outline(chunk_summaries) if chunk_summaries else ""
                 use_rag_flag = True
                 outline_elapsed = time.monotonic() - t_outline_start
+                logger.info(
+                    "Global RAG activated",
+                    extra={"chunks": num_chunks, "threshold": min_chunks},
+                )
                 logger.info("run_generation: Global RAG enabled (chunks=%s); outline %.2fs", num_chunks, outline_elapsed)
             except Exception as ex:
                 logger.warning("run_generation: outline/rag prep failed, falling back to no RAG: %s", ex)

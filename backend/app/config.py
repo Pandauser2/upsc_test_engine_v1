@@ -45,16 +45,18 @@ class Settings(BaseSettings):
     # File uploads (MVP: max 100 pages per PDF; reject larger at upload)
     upload_dir: Path = Path("./uploads")
     max_pdf_pages: int = 100
+    # On-demand extraction (GET /documents/{id}/extract when text empty): max wait in seconds; avoids hanging.
+    extract_on_demand_timeout_seconds: int = 600
 
     # Chunking: semantic (spaCy) or fixed
     chunk_mode: str = "semantic"
     chunk_size: int = 1500
     chunk_overlap_fraction: float = 0.2
 
-    # RAG (MCQ generation). Default off; enable in env to allow global RAG when doc has enough chunks.
-    use_global_rag: bool = False
-    # Enable global outline + RAG only when chunk count > this (default 9 → 10+ chunks). Protects small-job latency.
-    rag_min_chunks_for_global: int = 9
+    # RAG (MCQ generation). Set true to allow global RAG when doc has enough chunks (> rag_min_chunks_for_global).
+    use_global_rag: bool = True
+    # Enable global outline + RAG only when chunk count > this (default 20 → 21+ chunks). Env: RAG_MIN_CHUNKS_FOR_GLOBAL.
+    rag_min_chunks_for_global: int = 20
     rag_top_k: int = 5
     rag_embedding_model: str = "all-MiniLM-L6-v2"
     # Optional: filter retrieved chunks by L2 distance (keep if distance <= this). ~0.9 ≈ cosine > 0.6.

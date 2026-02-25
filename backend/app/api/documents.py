@@ -3,6 +3,7 @@ Documents API: PDF upload only (MVP: max 100 pages). Extraction runs in backgrou
 """
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
@@ -20,6 +21,7 @@ from app.schemas.document import (
 )
 from app.api.deps import get_current_user
 from app.jobs.tasks import run_extraction
+from app import metrics
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 logger = logging.getLogger(__name__)
@@ -196,17 +198,38 @@ def get_document_extract(
     if doc.source_type == "pdf" and not text:
         pdf_path = _resolve_pdf_path(doc)
         if pdf_path:
+            timeout_sec = getattr(settings, "extract_on_demand_timeout_seconds", 600)
             try:
                 from app.services.pdf_extraction_service import extract_hybrid
-                result = extract_hybrid(pdf_path)
-                text = result.text or ""
-                page_count = result.page_count
-                used_ocr_pages = list(result.used_ocr_pages)
-                extraction_valid = result.is_valid
-                extraction_error = result.error_message
-                if text:
-                    doc.extracted_text = text
-                    db.commit()
+                pool = ThreadPoolExecutor(max_workers=1)
+                try:
+                    future = pool.submit(extract_hybrid, pdf_path)
+                    result = future.result(timeout=timeout_sec)
+                    text = result.text or ""
+                    page_count = result.page_count
+                    used_ocr_pages = list(result.used_ocr_pages)
+                    extraction_valid = result.is_valid
+                    extraction_error = result.error_message
+                    if text:
+                        doc.extracted_text = text
+                        db.commit()
+                except (FuturesTimeoutError, TimeoutError):
+                    extraction_timeouts_total = metrics.increment_extraction_timeouts_total()
+                    logger.warning(
+                        "On-demand PDF extraction timed out",
+                        extra={
+                            "document_id": str(document_id),
+                            "timeout_seconds": timeout_sec,
+                            "extraction_timeouts_total": extraction_timeouts_total,
+                        },
+                    )
+                    extraction_valid = False
+                    extraction_error = (
+                        f"Extraction timed out (limit {timeout_sec}s). "
+                        "Retry GET /documents/{id}/extract later or check document status via GET /documents/{id}."
+                    )
+                finally:
+                    pool.shutdown(wait=False)  # return immediately on timeout; don't block until worker finishes
             except Exception as e:
                 logger.warning("On-demand PDF extraction failed for doc %s: %s", document_id, e)
                 extraction_valid = False

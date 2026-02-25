@@ -24,7 +24,8 @@ FastAPI app (Python 3.11): auth, documents, topics, tests, MCQ generation job, .
 - `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` — OpenAI when `LLM_PROVIDER=openai`.
 - `PROMPT_VERSION`, `MAX_GENERATION_TIME_SECONDS`, `MIN_EXTRACTION_WORDS` — Generation.
 - `UPLOAD_DIR`, `MAX_PDF_PAGES` (default 100) — Uploads.
-- `USE_GLOBAL_RAG`, `RAG_MIN_CHUNKS_FOR_GLOBAL` — RAG when doc has enough chunks. See `RAG_GLOBAL_OUTLINE.md`.
+- `EXTRACT_ON_DEMAND_TIMEOUT_SECONDS` (default 600) — Max wait for on-demand extraction in `GET /documents/{id}/extract` when text empty.
+- `USE_GLOBAL_RAG`, `RAG_MIN_CHUNKS_FOR_GLOBAL` (default 20) — RAG when doc has >N chunks. See `RAG_GLOBAL_OUTLINE.md`.
 - `ENABLE_EXPORT`, `EXPORTS_DIR` — Export baseline JSON. See `EXPORT_BASELINE.md`.
 - `CORS_ORIGINS` — Comma-separated (default `http://localhost:3000`).
 

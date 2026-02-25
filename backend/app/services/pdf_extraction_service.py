@@ -255,6 +255,51 @@ def _preprocess(text: str) -> str:
     return text.strip()
 
 
+def _extract_page_blocks_from_doc(page) -> str:
+    """
+    Extract text from one PyMuPDF page (blocks, reading order). Used when doc is already open.
+    """
+    try:
+        import pymupdf
+    except ImportError:
+        return ""
+    try:
+        raw_blocks = page.get_text("blocks", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)
+        if isinstance(raw_blocks, list) and raw_blocks:
+            ordered: list[tuple[float, float, str]] = []
+            for blk in raw_blocks:
+                if not isinstance(blk, (list, tuple)) or len(blk) < 7:
+                    continue
+                y0, x0 = blk[1], blk[0]
+                text = blk[4] if isinstance(blk[4], str) else ""
+                block_type = blk[6] if len(blk) > 6 else 0
+                if block_type == 0 and text.strip():
+                    ordered.append((y0, x0, text.strip()))
+            if ordered:
+                ordered.sort(key=lambda t: (round(t[0], 1), t[1]))
+                return "\n\n".join(t[2] for t in ordered)
+        raw = page.get_text("dict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)
+        blocks = raw.get("blocks", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+        if not blocks:
+            return (page.get_text("text") or "").strip()
+        ordered = []
+        for blk in blocks:
+            bbox = blk.get("bbox") or (0, 0, 0, 0)
+            y0, x0 = bbox[1], bbox[0]
+            lines_text = [
+                " ".join(span.get("text", "") for span in line.get("spans", [])).strip()
+                for line in blk.get("lines", [])
+            ]
+            block_text = "\n".join(ln for ln in lines_text if ln)
+            if block_text:
+                ordered.append((y0, x0, block_text))
+        ordered.sort(key=lambda t: (round(t[0], 1), t[1]))
+        return "\n\n".join(t[2] for t in ordered)
+    except Exception as e:
+        logger.warning("PyMuPDF blocks extraction failed: %s", e)
+        return ""
+
+
 def _extract_page_blocks_pymupdf(file_path: Path, page_index: int) -> str:
     """
     Extract text using PyMuPDF blocks; sort by y0 then x0 for reading order (Hindi left, English right).
@@ -271,41 +316,7 @@ def _extract_page_blocks_pymupdf(file_path: Path, page_index: int) -> str:
         with pymupdf.open(path) as doc:
             if page_index >= len(doc):
                 return ""
-            page = doc[page_index]
-            # Try "blocks" format first: list of (x0, y0, x1, y1, "text", block_no, block_type)
-            raw_blocks = page.get_text("blocks", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)
-            if isinstance(raw_blocks, list) and raw_blocks:
-                # Filter text blocks (block_type 0), sort by y0 then x0
-                ordered: list[tuple[float, float, str]] = []
-                for blk in raw_blocks:
-                    if not isinstance(blk, (list, tuple)) or len(blk) < 7:
-                        continue
-                    x0, y0, x1, y1 = blk[0], blk[1], blk[2], blk[3]
-                    text = blk[4] if isinstance(blk[4], str) else ""
-                    block_type = blk[6] if len(blk) > 6 else 0
-                    if block_type == 0 and text.strip():
-                        ordered.append((y0, x0, text.strip()))
-                if ordered:
-                    ordered.sort(key=lambda t: (round(t[0], 1), t[1]))
-                    return "\n\n".join(t[2] for t in ordered)
-            # Fallback: get_text("dict") with blocks
-            raw = page.get_text("dict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)
-            blocks = raw.get("blocks", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
-            if not blocks:
-                return (page.get_text("text") or "").strip()
-            ordered = []
-            for blk in blocks:
-                bbox = blk.get("bbox") or (0, 0, 0, 0)
-                y0, x0 = bbox[1], bbox[0]
-                lines_text = [
-                    " ".join(span.get("text", "") for span in line.get("spans", [])).strip()
-                    for line in blk.get("lines", [])
-                ]
-                block_text = "\n".join(ln for ln in lines_text if ln)
-                if block_text:
-                    ordered.append((y0, x0, block_text))
-            ordered.sort(key=lambda t: (round(t[0], 1), t[1]))
-            return "\n\n".join(t[2] for t in ordered)
+            return _extract_page_blocks_from_doc(doc[page_index])
     except Exception as e:
         logger.warning("PyMuPDF blocks extraction failed for page %s: %s", page_index, e)
         return ""
@@ -332,9 +343,8 @@ def _extract_tables_pdfplumber(page) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
-def _ocr_page_pymupdf(
-    file_path: Path,
-    page_index: int,
+def _ocr_page_from_doc(
+    page,
     *,
     dpi: int = OCR_DPI,
     lang: str = "hin+eng",
@@ -342,8 +352,7 @@ def _ocr_page_pymupdf(
     preprocess: bool = True,
 ) -> str:
     """
-    Render page to image (dpi 300–350), optionally preprocess with OpenCV, run Tesseract.
-    Config: --oem 3 (LSTM) --psm 6 (uniform block) or 3 (full page) --dpi. Post-OCR: ftfy + noise filter.
+    Run OCR on an already-opened PyMuPDF page. Used when doc is held open to avoid repeated file opens.
     """
     try:
         import pymupdf
@@ -352,18 +361,10 @@ def _ocr_page_pymupdf(
     except ImportError as e:
         logger.warning("OCR dependencies missing: %s", e)
         return ""
-
-    path = Path(file_path).resolve()
-    if not path.exists():
-        return ""
     try:
-        with pymupdf.open(path) as doc:
-            if page_index >= len(doc):
-                return ""
-            page = doc[page_index]
-            mat = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            img_bytes = pix.tobytes("png")
+        mat = pymupdf.Matrix(dpi / 72.0, dpi / 72.0)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img_bytes = pix.tobytes("png")
         img = Image.open(io.BytesIO(img_bytes))
         if preprocess and _OPENCV_AVAILABLE:
             img = _preprocess_image_for_ocr(img)
@@ -390,7 +391,7 @@ def _ocr_page_pymupdf(
             cleaned3 = _filter_noise_lines(cleaned3)
             if len(cleaned3.strip()) > len(cleaned.strip()):
                 cleaned = cleaned3
-                logger.debug("page %s: PSM 3 yielded more text than PSM 6", page_index + 1)
+                logger.debug("PSM 3 yielded more text than PSM 6")
         return cleaned
     except Exception as e:
         err_msg = str(e).strip().lower()
@@ -404,9 +405,38 @@ def _ocr_page_pymupdf(
                     "Then ensure 'tesseract' is on your PATH. See backend/SETUP_AND_RUN.md for details."
                 )
             else:
-                logger.debug("OCR skipped for page %s (Tesseract not available)", page_index)
+                logger.debug("OCR skipped (Tesseract not available)")
         else:
-            logger.warning("OCR failed for page %s: %s", page_index, e)
+            logger.warning("OCR failed: %s", e)
+        return ""
+
+
+def _ocr_page_pymupdf(
+    file_path: Path,
+    page_index: int,
+    *,
+    dpi: int = OCR_DPI,
+    lang: str = "hin+eng",
+    psm: int = 6,
+    preprocess: bool = True,
+) -> str:
+    """
+    Render page to image (dpi 300–350), optionally preprocess with OpenCV, run Tesseract.
+    Config: --oem 3 (LSTM) --psm 6 (uniform block) or 3 (full page) --dpi. Post-OCR: ftfy + noise filter.
+    """
+    path = Path(file_path).resolve()
+    if not path.exists():
+        return ""
+    try:
+        import pymupdf
+        with pymupdf.open(path) as doc:
+            if page_index >= len(doc):
+                return ""
+            return _ocr_page_from_doc(
+                doc[page_index], dpi=dpi, lang=lang, psm=psm, preprocess=preprocess
+            )
+    except Exception as e:
+        logger.warning("OCR failed for page %s: %s", page_index, e)
         return ""
 
 
@@ -456,6 +486,15 @@ def _extract_with_pdfplumber_layout(path: Path, page_index: int) -> str:
         return (t or "").strip()
 
 
+def _page_has_images_from_doc(page) -> bool:
+    """True if the page has any images. Uses already-open PyMuPDF page."""
+    try:
+        images = page.get_images()
+        return len(images) > 0
+    except Exception:
+        return False
+
+
 def _page_has_images(file_path: Path, page_index: int) -> bool:
     """True if the page has any images (useful for image-heavy PDFs with overlays)."""
     try:
@@ -463,8 +502,7 @@ def _page_has_images(file_path: Path, page_index: int) -> bool:
         with pymupdf.open(file_path) as doc:
             if page_index >= len(doc):
                 return False
-            images = doc[page_index].get_images()
-            return len(images) > 0
+            return _page_has_images_from_doc(doc[page_index])
     except Exception:
         return False
 
@@ -550,9 +588,10 @@ def extract_hybrid(
             used_ocr_pages=[],
         )
 
+    import pdfplumber
+    import pymupdf
     page_count = 0
     try:
-        import pymupdf
         with pymupdf.open(path) as doc:
             page_count = len(doc)
     except Exception as e:
@@ -564,7 +603,6 @@ def extract_hybrid(
             page_count=0,
             used_ocr_pages=[],
         )
-
     if page_count == 0:
         return ExtractionResult(
             text="",
@@ -574,79 +612,80 @@ def extract_hybrid(
             used_ocr_pages=[],
         )
 
-    # First pass: native text only to detect image-heavy docs (e.g. UPSC Vision IAS notes)
-    native_per_page: list[str] = []
-    for i in range(page_count):
-        raw = _extract_page_blocks_pymupdf(path, i)
-        if not raw.strip():
-            raw = _extract_with_pdfplumber_layout(path, i)
-        native_per_page.append(raw)
-    total_native = sum(len(p.strip()) for p in native_per_page)
-    image_heavy = total_native < IMAGE_HEAVY_DOC_THRESHOLD
-    if image_heavy:
-        logger.info(
-            "Image-heavy PDF detected: total_native=%s < %s → OCR will run on all pages",
-            total_native, IMAGE_HEAVY_DOC_THRESHOLD,
-        )
-
     per_page_texts: list[str] = []
     used_ocr_pages: list[int] = []
-    dpi_ocr = OCR_DPI_IMAGE_HEAVY if image_heavy else OCR_DPI
 
-    for i in range(page_count):
-        page_text = native_per_page[i]
-        native_len = len(page_text.strip())
-        raw_len = len(page_text)
-        garbled_count = _count_garbled_patterns(page_text)
+    # Open PyMuPDF and pdfplumber once for the entire extraction (avoids N× file opens).
+    with pymupdf.open(path) as doc:
+        native_per_page = [_extract_page_blocks_from_doc(doc[i]) for i in range(len(doc))]
+        has_images_list = [_page_has_images_from_doc(doc[i]) for i in range(len(doc))]
 
-        page_text = _fix_mojibake(page_text)
-        page_text = _preprocess(page_text)
-        ftfy_len = len(page_text)
+        with pdfplumber.open(path) as pdf:
+            for i in range(min(len(pdf.pages), len(native_per_page))):
+                if not native_per_page[i].strip():
+                    t = pdf.pages[i].extract_text(layout=True)
+                    native_per_page[i] = (t or "").strip()
 
-        try:
-            import pdfplumber
-            with pdfplumber.open(path) as pdf:
-                if i < len(pdf.pages):
-                    table_text = _extract_tables_pdfplumber(pdf.pages[i])
-                    if table_text:
-                        page_text = (page_text + "\n\n" + table_text).strip()
-        except Exception as e:
-            logger.debug("Tables extraction page %s: %s", i, e)
+            total_native = sum(len(p.strip()) for p in native_per_page)
+            image_heavy = total_native < IMAGE_HEAVY_DOC_THRESHOLD
+            if image_heavy:
+                logger.info(
+                    "Image-heavy PDF detected: total_native=%s < %s → OCR will run on all pages",
+                    total_native, IMAGE_HEAVY_DOC_THRESHOLD,
+                )
+            dpi_ocr = OCR_DPI_IMAGE_HEAVY if image_heavy else OCR_DPI
 
-        final_native_len = len(page_text.strip())
-        force_ocr = (
-            image_heavy
-            or final_native_len < AGGRESSIVE_OCR_PAGE_THRESHOLD
-            or _page_has_images(path, i)
-            or (use_ocr_for_low_text and _should_use_ocr(page_text, low_text_threshold, page_index=i))
-        )
+            for i in range(page_count):
+                page_text = native_per_page[i]
+                native_len = len(page_text.strip())
+                raw_len = len(page_text)
+                garbled_count = _count_garbled_patterns(page_text)
 
-        ocr_len = 0
-        if force_ocr:
-            psm = 6 if i < 2 else 3
-            ocr_text = _ocr_page_pymupdf(
-                path, i, dpi=dpi_ocr, lang="hin+eng", psm=psm, preprocess=_OPENCV_AVAILABLE
-            )
-            if ocr_text:
-                ocr_len = len(ocr_text)
-                used_ocr_pages.append(i)
-                if final_native_len < low_text_threshold:
-                    page_text = ocr_text
-                elif final_native_len > 500 and _count_garbled_patterns(page_text) <= 2:
-                    pass
-                elif ocr_len >= final_native_len * OCR_REPLACE_RATIO or ocr_len > final_native_len:
-                    page_text = ocr_text
-                    logger.debug("page %s: using OCR (native=%s ocr=%s)", i + 1, final_native_len, ocr_len)
-                else:
-                    page_text = page_text + "\n\n[OCR: page " + str(i + 1) + "]\n" + ocr_text
+                page_text = _fix_mojibake(page_text)
+                page_text = _preprocess(page_text)
 
-        final_len = len(page_text.strip())
-        sample = (page_text[:120] + "…") if len(page_text) > 120 else page_text
-        logger.debug(
-            "page %s: native_len=%s ocr_len=%s final_len=%s garbled_count=%s | sample=%s",
-            i + 1, raw_len, ocr_len, final_len, garbled_count, repr(sample),
-        )
-        per_page_texts.append(page_text)
+                try:
+                    if i < len(pdf.pages):
+                        table_text = _extract_tables_pdfplumber(pdf.pages[i])
+                        if table_text:
+                            page_text = (page_text + "\n\n" + table_text).strip()
+                except Exception as e:
+                    logger.debug("Tables extraction page %s: %s", i, e)
+
+                final_native_len = len(page_text.strip())
+                force_ocr = (
+                    image_heavy
+                    or final_native_len < AGGRESSIVE_OCR_PAGE_THRESHOLD
+                    or has_images_list[i]
+                    or (use_ocr_for_low_text and _should_use_ocr(page_text, low_text_threshold, page_index=i))
+                )
+
+                ocr_len = 0
+                if force_ocr:
+                    psm = 6 if i < 2 else 3
+                    ocr_text = _ocr_page_from_doc(
+                        doc[i], dpi=dpi_ocr, lang="hin+eng", psm=psm, preprocess=_OPENCV_AVAILABLE
+                    )
+                    if ocr_text:
+                        ocr_len = len(ocr_text)
+                        used_ocr_pages.append(i)
+                        if final_native_len < low_text_threshold:
+                            page_text = ocr_text
+                        elif final_native_len > 500 and _count_garbled_patterns(page_text) <= 2:
+                            pass
+                        elif ocr_len >= final_native_len * OCR_REPLACE_RATIO or ocr_len > final_native_len:
+                            page_text = ocr_text
+                            logger.debug("page %s: using OCR (native=%s ocr=%s)", i + 1, final_native_len, ocr_len)
+                        else:
+                            page_text = page_text + "\n\n[OCR: page " + str(i + 1) + "]\n" + ocr_text
+
+                final_len = len(page_text.strip())
+                sample = (page_text[:120] + "…") if len(page_text) > 120 else page_text
+                logger.debug(
+                    "page %s: native_len=%s ocr_len=%s final_len=%s garbled_count=%s | sample=%s",
+                    i + 1, raw_len, ocr_len, final_len, garbled_count, repr(sample),
+                )
+                per_page_texts.append(page_text)
 
     full_text = "\n\n".join(per_page_texts)
     raw_full = full_text
