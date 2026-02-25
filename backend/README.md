@@ -4,33 +4,35 @@ FastAPI app (Python 3.11): auth, documents, topics, tests, MCQ generation job, .
 
 ## Setup
 
-1. Copy `.env.example` from project root to `backend/.env` (or set env vars).
-2. Start Postgres (e.g. `docker-compose up -d` from project root).
-3. Create DB and run migrations:
+1. Copy `.env.example` (repo root) to `backend/.env` or set env vars.
+2. **DB**: Default is SQLite (`DATABASE_URL=sqlite:///./upsc_dev.db`). Tables created on startup. For Postgres: set `DATABASE_URL`, run `docker-compose up -d` from repo root if needed, then `alembic upgrade head`.
+3. Install and run:
    ```bash
    cd backend
    pip install -r requirements.txt
-   alembic upgrade head
-   ```
-4. Run the API:
-   ```bash
+   alembic upgrade head   # optional for SQLite (init_sqlite_db runs at startup)
    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
    ```
+4. Health: `GET /health` → `{"status":"ok"}`.
 
-## Env (see root `.env.example`)
+## Env (see repo root `.env.example` and `app/config.py`)
 
-- `DATABASE_URL` — Postgres connection string.
+- `DATABASE_URL` — SQLite default `sqlite:///./upsc_dev.db`; Postgres for production.
 - `SECRET_KEY`, `JWT_ALGORITHM`, `JWT_EXPIRE_HOURS` — Auth.
-- `OPENAI_API_KEY`, `OPENAI_MODEL`, `PROMPT_VERSION`, `MAX_GENERATION_TIME_SECONDS` — LLM.
-- `UPLOAD_DIR` — Directory for uploaded PDFs (default `./uploads`).
-- `USE_GLOBAL_RAG` — Allow global RAG when doc has >RAG_MIN_CHUNKS_FOR_GLOBAL chunks (default false). See `RAG_GLOBAL_OUTLINE.md`.
-- `ENABLE_EXPORT` — If true, allows `export_result=true` on generate and writes MCQs to `exports/`. See `EXPORT_BASELINE.md`.
+- `LLM_PROVIDER` — `claude` (default) or `openai`.
+- `CLAUDE_API_KEY`, `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_SECONDS` — Claude. No key → mock LLM.
+- `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` — OpenAI when `LLM_PROVIDER=openai`.
+- `PROMPT_VERSION`, `MAX_GENERATION_TIME_SECONDS`, `MIN_EXTRACTION_WORDS` — Generation.
+- `UPLOAD_DIR`, `MAX_PDF_PAGES` (default 100) — Uploads.
+- `USE_GLOBAL_RAG`, `RAG_MIN_CHUNKS_FOR_GLOBAL` — RAG when doc has enough chunks. See `RAG_GLOBAL_OUTLINE.md`.
+- `ENABLE_EXPORT`, `EXPORTS_DIR` — Export baseline JSON. See `EXPORT_BASELINE.md`.
+- `CORS_ORIGINS` — Comma-separated (default `http://localhost:3000`).
 
-Generation uses parallel single Claude calls (no Message Batches). Status from DB only; see `GENERATION_REFACTOR_STATUS.md`.
+Generation: parallel single Claude calls (no Message Batches). Status from DB only; see `GENERATION_REFACTOR_STATUS.md`.
 
 ## API (all under `/`)
 
 - `POST /auth/register`, `POST /auth/login`, `GET /auth/me`
-- `POST /documents/upload`, `POST /documents`, `GET /documents`, `GET /documents/{id}`
+- `POST /documents/upload`, `GET /documents`, `GET /documents/{id}`, `GET /documents/{id}/extract`
 - `GET /topics`
-- `POST /tests/generate`, `GET /tests`, `GET /tests/{id}`, `PATCH /tests/{id}`, `PATCH /tests/{id}/questions/{qid}`, `POST /tests/{id}/questions`, `POST /tests/{id}/export`
+- `POST /tests/generate`, `GET /tests`, `GET /tests/{id}`, `GET /tests/{id}/status`, `POST /tests/{id}/cancel`, `PATCH /tests/{id}`, `PATCH /tests/{id}/questions/{qid}`, `POST /tests/{id}/questions`, `POST /tests/{id}/export`

@@ -108,6 +108,7 @@ class TestResponse(BaseModel):
     target_questions: int | None = None
     progress: float | None = None  # 0.0–1.0 when generating
     progress_message: str | None = None  # e.g. "3 of 10 questions created"
+    elapsed_time: int | None = None  # time from create to done (seconds), computed from updated_at - created_at when status is terminal
 
     class Config:
         from_attributes = True
@@ -129,6 +130,7 @@ class TestStatusResponse(BaseModel):
     message: str
     questions_generated: int = 0
     target_questions: int = 0
+    elapsed_time: int | None = None  # time from create to done (seconds), computed from updated_at - created_at when status is terminal
 
 
 class TestPatchRequest(BaseModel):

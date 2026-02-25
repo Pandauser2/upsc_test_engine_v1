@@ -46,6 +46,25 @@ def _age_seconds(created_at: datetime) -> float:
     return (now - c).total_seconds()
 
 
+def _test_elapsed_time_seconds(t: GeneratedTest) -> int | None:
+    """
+    Compute elapsed_time for test response: time from create to last update (includes queue + job).
+    Only set when generation has finished (terminal status); otherwise return None.
+    Calculation: (updated_at - created_at).total_seconds() when both exist and status is terminal.
+    """
+    if t.status not in ("completed", "partial", "failed", "failed_timeout"):
+        return None
+    updated = t.updated_at or t.created_at
+    created = t.created_at
+    if not updated or not created:
+        return None
+    try:
+        delta = updated - created
+        return int(delta.total_seconds())
+    except (TypeError, AttributeError):
+        return None
+
+
 def _test_to_response(t: GeneratedTest, stale: bool = False) -> TestResponse:
     target = getattr(t, "target_questions", None) or 0
     generated = getattr(t, "questions_generated", None) or 0
@@ -69,6 +88,7 @@ def _test_to_response(t: GeneratedTest, stale: bool = False) -> TestResponse:
         target_questions=target or None,
         progress=progress,
         progress_message=progress_message,
+        elapsed_time=_test_elapsed_time_seconds(t),
     )
 
 
@@ -218,6 +238,7 @@ def get_test_status(
         message=message,
         questions_generated=generated,
         target_questions=target,
+        elapsed_time=_test_elapsed_time_seconds(test),
     )
 
 

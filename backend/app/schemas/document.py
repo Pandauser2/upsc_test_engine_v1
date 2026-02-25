@@ -13,6 +13,7 @@ class DocumentResponse(BaseModel):
     title: str | None
     status: str
     target_questions: int | None = None  # 1-20, from upload form or default
+    elapsed_time: int | None = None  # extraction duration in seconds (integer)
     created_at: datetime
 
     class Config:
@@ -35,6 +36,7 @@ class DocumentExtractResponse(BaseModel):
     source_type: str
     filename: str | None = None
     status: str
+    elapsed_time: int | None = None  # extraction duration in seconds (integer)
     extracted_text: str
     character_count: int = 0
     word_count: int = 0

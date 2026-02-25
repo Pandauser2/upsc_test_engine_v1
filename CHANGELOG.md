@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **POST /tests/{id}/cancel** — Cancel a pending or generating test (marks failed, "Cancelled by user"). No-op if already completed/partial/failed.
+- **409 on duplicate generation** — `POST /tests/generate` returns 409 if a run is already pending/generating for that document.
+- **Generation heartbeat** — During `run_generation`, test `updated_at` is refreshed so active jobs aren't cleared as stuck (stale check uses `COALESCE(updated_at, created_at)`).
+- **Dynamic stale timeout** — Timeout = `max_stale_generation_seconds` + (num_chunks // 10 * 60) so long PDFs aren't marked `failed_timeout` prematurely.
+- **elapsed_time in responses** — Document responses (list, get, GET /documents/{id}/extract) include `elapsed_time` (integer seconds): PDF extraction duration from `run_extraction` (time.monotonic() start→finish), stored in `extraction_elapsed_seconds`; migration 007 adds column. Test responses (list, get, GET /tests/{id}/status) include `elapsed_time`: time from create to done, computed in API as `(updated_at - created_at).total_seconds()` when status is terminal (no DB column).
 - **Quality baseline export** — `POST /tests/generate` accepts `export_result: true`. When `ENABLE_EXPORT=true`, completed MCQs are written to `backend/exports/{test_id}.json`. Extra logging (chunks, context length, raw LLM snippet) when enabled. Off by default. See `backend/EXPORT_BASELINE.md`.
 - **RAG + global outline (gated)** — Default off. When `USE_GLOBAL_RAG=true` and doc has >`RAG_MIN_CHUNKS_FOR_GLOBAL` chunks (default 9), generation builds chunk summaries → global outline → `use_rag=True`. FAISS + top_k=5; optional `rag_relevance_max_l2`. Fallback to chunk-only on failure. See `backend/RAG_GLOBAL_OUTLINE.md`.
 - **GET /tests/{id}/status** — When status is `pending`/`generating`, message includes "Generating... usually under 1 minute". Progress = `questions_generated / target_questions`; no batch polling.

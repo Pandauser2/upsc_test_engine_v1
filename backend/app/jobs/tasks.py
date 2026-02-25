@@ -70,7 +70,10 @@ def _resolve_pdf_path(doc: Document) -> str | None:
 
 
 def run_extraction(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
-    """Background task: run PDF extraction and store extracted_text; set status ready or extraction_failed."""
+    """Background task: run PDF extraction and store extracted_text; set status ready or extraction_failed.
+    Elapsed time: we measure with time.monotonic() from start to finish and store in doc.extraction_elapsed_seconds
+    (integer seconds); returned as elapsed_time in document response JSON."""
+    t0 = time.monotonic()
     db: Session | None = None
     try:
         db = SessionLocal()
@@ -86,23 +89,29 @@ def run_extraction(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
             return
         pdf_path = _resolve_pdf_path(doc)
         if not pdf_path:
+            elapsed = int(time.monotonic() - t0)
+            doc.extraction_elapsed_seconds = elapsed
             doc.status = "extraction_failed"
             doc.extracted_text = ""
             db.commit()
-            logger.warning("run_extraction: PDF file not found for doc %s", doc_id)
+            logger.warning("run_extraction: PDF file not found for doc %s (elapsed=%ss)", doc_id, elapsed)
             return
         from app.services.pdf_extraction_service import extract_hybrid
         result = extract_hybrid(pdf_path)
+        elapsed = int(time.monotonic() - t0)
         doc.extracted_text = result.text or ""
         doc.status = "ready" if (result.is_valid and (result.text or "").strip()) else "extraction_failed"
+        doc.extraction_elapsed_seconds = elapsed
         db.commit()
-        logger.info("run_extraction: doc %s status=%s text_len=%s", doc_id, doc.status, len(doc.extracted_text))
+        logger.info("run_extraction: doc %s status=%s text_len=%s elapsed_time=%ss", doc_id, doc.status, len(doc.extracted_text), elapsed)
     except Exception as e:
-        logger.exception("run_extraction failed for doc_id=%s", doc_id)
+        elapsed = int(time.monotonic() - t0)
+        logger.exception("run_extraction failed for doc_id=%s (elapsed=%ss)", doc_id, elapsed)
         if db:
             try:
                 doc = db.query(Document).filter(Document.id == doc_id).first()
                 if doc:
+                    doc.extraction_elapsed_seconds = elapsed
                     doc.status = "extraction_failed"
                     doc.extracted_text = ""
                     db.commit()
@@ -305,7 +314,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         if elapsed > timeout_sec:
             test.status = "failed_timeout"
             test.failure_reason = f"Run exceeded {timeout_sec}s"
-            logger.info("run_generation: Job timed out after %.0f seconds (chunks=%s, target=%s)", elapsed, num_chunks, target_n)
+            logger.info("run_generation: Job timed out after %.0fs (chunks=%s, target=%s)", elapsed, num_chunks, target_n)
         else:
             test.status = "completed" if len(mcqs) >= target_n else "partial"
             test.failure_reason = None

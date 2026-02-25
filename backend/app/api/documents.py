@@ -44,6 +44,7 @@ def _pdf_page_count(contents: bytes) -> int | None:
 
 
 def _doc_to_response(d: Document) -> DocumentResponse:
+    # elapsed_time: extraction duration in seconds, set by run_extraction when PDF extraction finishes
     return DocumentResponse(
         id=str(d.id),
         user_id=str(d.user_id),
@@ -52,6 +53,7 @@ def _doc_to_response(d: Document) -> DocumentResponse:
         title=d.title,
         status=d.status,
         target_questions=getattr(d, "target_questions", None),
+        elapsed_time=getattr(d, "extraction_elapsed_seconds", None),
         created_at=d.created_at,
     )
 
@@ -218,6 +220,7 @@ def get_document_extract(
         source_type=doc.source_type,
         filename=doc.filename,
         status=doc.status,
+        elapsed_time=getattr(doc, "extraction_elapsed_seconds", None),
         extracted_text=text,
         character_count=len(text),
         word_count=_word_count(text),

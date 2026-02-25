@@ -45,6 +45,8 @@ def init_sqlite_db():
             doc_rows = db.execute(text("PRAGMA table_info(documents)")).fetchall()
             if doc_rows and not any(r[1] == "target_questions" for r in doc_rows):
                 db.execute(text("ALTER TABLE documents ADD COLUMN target_questions INTEGER DEFAULT 15"))
+            if doc_rows and not any(r[1] == "extraction_elapsed_seconds" for r in doc_rows):
+                db.execute(text("ALTER TABLE documents ADD COLUMN extraction_elapsed_seconds INTEGER"))
             db.commit()
         except Exception:
             db.rollback()
