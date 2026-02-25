@@ -6,6 +6,7 @@ Uses CLAUDE_API_KEY or ANTHROPIC_API_KEY. Retries on 429 with exponential backof
 import json
 import logging
 import os
+import time
 
 from anthropic import Anthropic
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -16,8 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 def _is_rate_limit(exc: BaseException) -> bool:
-    """Retry on 429 rate limit."""
-    return "429" in str(exc) or "rate limit" in str(exc).lower() or "rate_limit" in str(exc).lower()
+    """Retry on 429 rate limit, 529 overloaded, and overloaded_error."""
+    msg = str(exc).lower()
+    if "429" in str(exc) or "rate limit" in msg or "rate_limit" in msg:
+        return True
+    if "529" in str(exc) or "overloaded" in msg or "overloaded_error" in msg:
+        return True
+    return False
 
 
 MCQ_GEN_SYSTEM = """You are an expert UPSC Civil Services Examination question setter. The study material below may be long and span multiple pages or sections. Your task is to read the ENTIRE material and generate high-quality, conceptually rigorous MCQs suitable for UPSC Prelims.
@@ -105,6 +111,7 @@ Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff
             )
 
         try:
+            t_api_start = time.perf_counter()
             logger.info(
                 "Claude API request: model=%s, num_questions=%s, text_len=%s",
                 self._model,
@@ -112,6 +119,7 @@ Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff
                 len(text_chunk),
             )
             response = _create()
+            logger.info("Claude generate_mcqs API %.2fs", time.perf_counter() - t_api_start)
         except Exception as e:
             logger.exception("Claude generate_mcqs failed: %s", e)
             raise

@@ -95,12 +95,42 @@ def run_extraction(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
             db.commit()
             logger.warning("run_extraction: PDF file not found for doc %s (elapsed=%ss)", doc_id, elapsed)
             return
+        # Set total_pages and progress so GET /documents/{id} can show "Extracting pages X/Y"
+        try:
+            import pymupdf
+            with pymupdf.open(pdf_path) as pdf_doc:
+                total_pages = len(pdf_doc)
+            doc.total_pages = total_pages
+            doc.extracted_pages = 0
+            db.commit()
+        except Exception as e:
+            logger.warning("run_extraction: could not get page count for doc %s: %s", doc_id, e)
         from app.services.pdf_extraction_service import extract_hybrid
-        result = extract_hybrid(pdf_path)
+
+        _last_progress: list[int] = [0]
+
+        def _progress(extracted: int, total: int) -> None:
+            # Throttle: update DB at most every 5 pages, or always on last page
+            if extracted != total and (extracted - _last_progress[0]) < 5:
+                return
+            _last_progress[0] = extracted
+            _db = SessionLocal()
+            try:
+                row = _db.query(Document).filter(Document.id == doc_id, Document.user_id == user_id).first()
+                if row:
+                    row.extracted_pages = extracted
+                    _db.commit()
+            except Exception as ex:
+                logger.debug("run_extraction: progress update failed: %s", ex)
+            finally:
+                _db.close()
+
+        result = extract_hybrid(pdf_path, progress_callback=_progress)
         elapsed = int(time.monotonic() - t0)
         doc.extracted_text = result.text or ""
         doc.status = "ready" if (result.is_valid and (result.text or "").strip()) else "extraction_failed"
         doc.extraction_elapsed_seconds = elapsed
+        doc.extracted_pages = result.page_count
         db.commit()
         logger.info("run_extraction: doc %s status=%s text_len=%s elapsed_time=%ss", doc_id, doc.status, len(doc.extracted_text), elapsed)
     except Exception as e:
@@ -123,7 +153,7 @@ def run_extraction(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
 
 def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
     """
-    Background task: extract → chunk → 4 parallel Sonnet calls → filter bad critique → sort → persist up to N.
+    Background task: extract → chunk → 4 parallel Gemini calls → filter bad critique → sort → persist up to N.
     Uses document.extracted_text; no vision path. Progress via processed_candidates (0–4) in DB; stale timeout by elapsed.
     """
     run_start = time.perf_counter()
@@ -161,6 +191,12 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         min_words = getattr(settings, "min_extraction_words", 500)
         if len(extracted_text.split()) < min_words:
             _mark_failed(db, test, f"Extracted text has fewer than {min_words} words; need more content for generation.")
+            return
+
+        # Never run with mock LLM: fail the test if key is missing (use shared resolver with .env fallback)
+        from app.llm.gemini_impl import get_gemini_api_key
+        if not get_gemini_api_key():
+            _mark_failed(db, test, "GEMINI_API_KEY not set. Set it in backend/.env and restart the server.")
             return
 
         _generation_semaphore.acquire()
@@ -202,6 +238,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
 
         from app.services.chunking_service import chunk_text
         mode = getattr(settings, "chunk_mode", "semantic")
+        t_chunk_outline_start = time.perf_counter()
         chunks_for_outline = chunk_text(
             extracted_text,
             mode=mode,
@@ -209,6 +246,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
         )
         num_chunks = len(chunks_for_outline or [])
+        logger.info("run_generation: chunking (outline) %.2fs chunks=%s", time.perf_counter() - t_chunk_outline_start, num_chunks)
         min_chunks = getattr(settings, "rag_min_chunks_for_global", 20)
         use_global_rag = getattr(settings, "use_global_rag", True)
         global_outline_arg: str | None = None
@@ -291,7 +329,8 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         gen_elapsed = time.perf_counter() - t_gen_start
         logger.info("run_generation: generate_mcqs_with_rag %.2fs (use_rag=%s)", gen_elapsed, use_rag_flag)
 
-        # Drop any with bad critique (already have validation_result from generate_mcqs_with_rag)
+        # Drop any with bad critique (already have validation_result from generate_mcqs_with_rag); then sort and take target_n (dedupe/rank)
+        t_dedupe_start = time.perf_counter()
         mcqs = []
         for m in all_mcqs:
             critique = (m.get("validation_result") or "").lower()
@@ -299,6 +338,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
                 continue
             mcqs.append(m)
         mcqs = _sort_medium_first(mcqs)[:target_n]
+        logger.info("run_generation: dedupe/rank %.2fs (filtered to %s)", time.perf_counter() - t_dedupe_start, len(mcqs))
 
         if not mcqs:
             _mark_failed(db, test, "No valid MCQs after filtering (text pipeline).")

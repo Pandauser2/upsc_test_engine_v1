@@ -10,6 +10,7 @@ alembic>=1.13.0
 # Config and validation
 pydantic>=2.6.0
 pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
 email-validator>=2.0.0
 
 # Auth
@@ -26,8 +27,9 @@ Pillow>=10.0.0
 opencv-python-headless>=4.8.0
 spacy>=3.7.0
 
-# LLM: Claude (default) and optional OpenAI
+# LLM: Gemini (google.genai); legacy packages kept for reference only
 anthropic>=0.39.0
+google-genai>=1.0.0
 openai>=1.12.0
 httpx<0.28
 tiktoken>=0.5.0

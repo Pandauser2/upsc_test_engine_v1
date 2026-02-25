@@ -53,6 +53,10 @@ def init_sqlite_db():
                 db.execute(text("ALTER TABLE documents ADD COLUMN target_questions INTEGER DEFAULT 15"))
             if doc_rows and not any(r[1] == "extraction_elapsed_seconds" for r in doc_rows):
                 db.execute(text("ALTER TABLE documents ADD COLUMN extraction_elapsed_seconds INTEGER"))
+            if doc_rows and not any(r[1] == "total_pages" for r in doc_rows):
+                db.execute(text("ALTER TABLE documents ADD COLUMN total_pages INTEGER"))
+            if doc_rows and not any(r[1] == "extracted_pages" for r in doc_rows):
+                db.execute(text("ALTER TABLE documents ADD COLUMN extracted_pages INTEGER NOT NULL DEFAULT 0"))
             db.commit()
         except Exception as e:
             logger.warning("SQLite init: documents column add failed: %s", e)

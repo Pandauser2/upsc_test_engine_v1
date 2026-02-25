@@ -53,6 +53,19 @@ def test_extract_text_only_pdf(text_only_pdf):
     assert result.used_ocr_pages == []
 
 
+def test_extract_hybrid_progress_callback(text_only_pdf):
+    """Progress callback is invoked with (extracted_pages, total_pages) during merge."""
+    progress_calls: list[tuple[int, int]] = []
+
+    def capture(done: int, total: int) -> None:
+        progress_calls.append((done, total))
+
+    result = extract_hybrid(text_only_pdf, use_ocr_for_low_text=False, progress_callback=capture)
+    assert result.page_count == 1
+    assert len(progress_calls) >= 1
+    assert progress_calls[-1] == (1, 1)
+
+
 def test_extract_nonexistent_file():
     result = extract_hybrid("/nonexistent/file.pdf")
     assert result.is_valid is False
@@ -61,6 +74,7 @@ def test_extract_nonexistent_file():
 
 
 def test_extract_invalid_pdf(tmp_path):
+    pytest.importorskip("pdfplumber", reason="pdfplumber required for extract_hybrid")
     path = tmp_path / "invalid.pdf"
     path.write_bytes(b"not a pdf")
     result = extract_hybrid(path)

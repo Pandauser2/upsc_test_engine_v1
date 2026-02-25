@@ -65,6 +65,23 @@ def _test_elapsed_time_seconds(t: GeneratedTest) -> int | None:
         return None
 
 
+def _normalize_created_at(value):  # noqa: ANN001
+    """Ensure created_at is a datetime for Pydantic (SQLite can return None or str)."""
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            s = value.replace("Z", "+00:00").strip()
+            if " " in s and "T" not in s:
+                s = s.replace(" ", "T", 1)
+            return datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            return datetime.now(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
 def _test_to_response(t: GeneratedTest, stale: bool = False) -> TestResponse:
     target = getattr(t, "target_questions", None) or 0
     generated = getattr(t, "questions_generated", None) or 0
@@ -82,7 +99,7 @@ def _test_to_response(t: GeneratedTest, stale: bool = False) -> TestResponse:
         estimated_output_tokens=t.estimated_output_tokens,
         estimated_cost_usd=t.estimated_cost_usd,
         failure_reason=getattr(t, "failure_reason", None),
-        created_at=t.created_at,
+        created_at=_normalize_created_at(getattr(t, "created_at", None)),
         stale=stale,
         questions_generated=generated if target else None,
         target_questions=target or None,
@@ -161,6 +178,14 @@ def start_generation(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="A generation is already in progress for this document. Wait for it to finish.",
+        )
+    # Require Gemini API key so we never return mock MCQs as if they were real (use shared resolver with .env fallback)
+    from app.llm.gemini_impl import get_gemini_api_key
+    gemini_key = get_gemini_api_key()
+    if not gemini_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GEMINI_API_KEY is not set. Set it in backend/.env (or your environment) for real MCQ generation.",
         )
     target_n = max(1, min(20, data.num_questions))
     test = GeneratedTest(

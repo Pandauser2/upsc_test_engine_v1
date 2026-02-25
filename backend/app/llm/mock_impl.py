@@ -1,5 +1,5 @@
 """
-Mock LLM: returns placeholder MCQs when CLAUDE_API_KEY / ANTHROPIC_API_KEY is not set.
+Mock LLM: returns placeholder MCQs when GEMINI_API_KEY is not set.
 Single-call pipeline for local testing (1–25 questions).
 """
 import hashlib
@@ -37,7 +37,7 @@ def _make_mock_mcqs(
                 "D": "Option D (mock)",
             },
             "correct_option": ["A", "B", "C", "D"][i % 4],
-            "explanation": f"Mock explanation for question {i + 1}. Set CLAUDE_API_KEY in .env for real generation.",
+            "explanation": f"Mock explanation for question {i + 1}. Set GEMINI_API_KEY in .env for real generation.",
             "difficulty": diff,
             "topic_tag": slug,
         })
@@ -64,7 +64,7 @@ class MockLLMService:
 
     def validate_mcq(self, mcq: dict) -> tuple[str, int, int]:
         """Return (mock critique, 0, 0)."""
-        return ("Approved (mock). Set CLAUDE_API_KEY for real validation.", 0, 0)
+        return ("Approved (mock). Set GEMINI_API_KEY for real validation.", 0, 0)
 
 
 def get_mock_llm_service() -> MockLLMService:

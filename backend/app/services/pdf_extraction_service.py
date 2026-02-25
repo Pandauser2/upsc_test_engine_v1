@@ -1,7 +1,7 @@
 """
 Hybrid PDF extraction for bilingual (Hindi–English) and image-heavy PDFs (e.g. UPSC Vision IAS notes).
 - Text/tables via pdfplumber; layout-aware extraction via PyMuPDF blocks.
-- Aggressive OCR for image-heavy docs: native text < 5000 total or per-page < 300 or page has images.
+- OCR only when native text < threshold (e.g. 100 chars/page); parallel OCR via ThreadPoolExecutor.
 - OpenCV preprocessing (gray, adaptive threshold, denoise) before OCR when available.
 - Tesseract --oem 3 --psm 6/3, lang eng+hin; post-OCR ftfy and noise-line filter.
 - Final dedupe, newline normalization, UTF-8.
@@ -11,9 +11,11 @@ import logging
 import os
 import re
 import tempfile
+import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 try:
     import cv2
@@ -29,8 +31,12 @@ _tesseract_not_installed_logged: bool = False
 
 # Per-page: below this char count we consider OCR (or if garbled ratio high)
 LOW_TEXT_THRESHOLD = 100
+# OCR only when native text per page < this (reduces OCR calls; preserve accuracy with garbled checks)
+OCR_CHARS_PER_PAGE_THRESHOLD = 100
 # Aggressive OCR: if native text per page below this, force OCR (image-heavy PDFs)
 AGGRESSIVE_OCR_PAGE_THRESHOLD = 300
+# Parallel OCR workers (each worker opens PDF; avoids PyMuPDF thread-safety issues)
+OCR_MAX_WORKERS = 12
 # If total native text (first pass) below this, treat doc as image-heavy → OCR all pages
 IMAGE_HEAVY_DOC_THRESHOLD = 5000
 # Post-OCR: drop lines shorter than this (noise)
@@ -440,6 +446,20 @@ def _ocr_page_pymupdf(
         return ""
 
 
+def _ocr_page_with_timing(
+    path: Path,
+    page_index: int,
+    dpi: int,
+    psm: int,
+    preprocess: bool,
+) -> tuple[int, str, float]:
+    """Run OCR for one page; return (page_index, text, elapsed_seconds). Used for parallel OCR + per-page timing."""
+    t0 = time.perf_counter()
+    text = _ocr_page_pymupdf(path, page_index, dpi=dpi, psm=psm, preprocess=preprocess)
+    elapsed = time.perf_counter() - t0
+    return (page_index, text, elapsed)
+
+
 def _final_clean(text: str) -> str:
     """
     Deduplicate repeated lines/footnotes, merge short lines into paragraphs, normalize whitespace, ensure UTF-8.
@@ -567,16 +587,16 @@ def extract_hybrid(
     *,
     low_text_threshold: int = LOW_TEXT_THRESHOLD,
     use_ocr_for_low_text: bool = True,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> ExtractionResult:
     """
     Hybrid extraction for bilingual (Hindi–English) PDFs:
-    1. Per page: try PyMuPDF blocks (reading order) → fallback pdfplumber layout.
-    2. Run ftfy on raw text to fix mojibake (Devanagari).
-    3. Append tables from pdfplumber as "Table N:".
-    4. If page is low-text or high garbled ratio: OCR with eng+hin+equ, 300 DPI; merge.
-    5. Final clean: dedupe lines, normalize whitespace.
-    6. If total cleaned text < MIN_VALID_TEXT_LEN → is_valid=False.
+    1. Native text: PyMuPDF blocks → pdfplumber layout fallback.
+    2. Per page: mojibake fix, preprocess, tables. OCR only if native < threshold (e.g. 100 chars) or garbled.
+    3. Parallel OCR for pages that need it (ThreadPoolExecutor, max_workers=12).
+    4. Final clean: dedupe, normalize. progress_callback(extracted_pages, total_pages) called during merge.
     """
+    t_total_start = time.perf_counter()
     path = Path(file_path).resolve()
     if not path.exists():
         logger.warning("extract_hybrid: file not found %s", path)
@@ -612,85 +632,153 @@ def extract_hybrid(
             used_ocr_pages=[],
         )
 
-    per_page_texts: list[str] = []
-    used_ocr_pages: list[int] = []
+    # OCR trigger: run OCR only when native text per page is BELOW this (text-heavy pages skip OCR).
+    # force_ocr = (final_native_len < ocr_threshold). Table text is included in final_native_len.
+    try:
+        from app.config import settings
+        ocr_threshold = int(getattr(settings, "ocr_threshold", 50))
+    except Exception:
+        ocr_threshold = int(os.environ.get("OCR_THRESHOLD", "50"))
+    ocr_threshold = max(1, min(500, ocr_threshold))
 
-    # Open PyMuPDF and pdfplumber once for the entire extraction (avoids N× file opens).
+    # ---- Phase 1: Native extraction (PyMuPDF + pdfplumber fill) ----
+    t_native_start = time.perf_counter()
     with pymupdf.open(path) as doc:
         native_per_page = [_extract_page_blocks_from_doc(doc[i]) for i in range(len(doc))]
-        has_images_list = [_page_has_images_from_doc(doc[i]) for i in range(len(doc))]
 
         with pdfplumber.open(path) as pdf:
             for i in range(min(len(pdf.pages), len(native_per_page))):
                 if not native_per_page[i].strip():
                     t = pdf.pages[i].extract_text(layout=True)
                     native_per_page[i] = (t or "").strip()
+    t_native_end = time.perf_counter()
+    native_extraction_time = t_native_end - t_native_start
+    total_native = sum(len(p.strip()) for p in native_per_page)
+    logger.info(
+        "extract_hybrid: native_extraction pages=%s total_native_chars=%s time=%.2fs",
+        page_count, total_native, native_extraction_time,
+    )
 
-            total_native = sum(len(p.strip()) for p in native_per_page)
-            image_heavy = total_native < IMAGE_HEAVY_DOC_THRESHOLD
-            if image_heavy:
-                logger.info(
-                    "Image-heavy PDF detected: total_native=%s < %s → OCR will run on all pages",
-                    total_native, IMAGE_HEAVY_DOC_THRESHOLD,
-                )
-            dpi_ocr = OCR_DPI_IMAGE_HEAVY if image_heavy else OCR_DPI
+    dpi_ocr = OCR_DPI
 
-            for i in range(page_count):
-                page_text = native_per_page[i]
-                native_len = len(page_text.strip())
-                raw_len = len(page_text)
-                garbled_count = _count_garbled_patterns(page_text)
+    # ---- Phase 2: Preprocess + decide OCR per page (sequential) ----
+    # OCR only when page is image-dominated: native text (incl. tables) < OCR_THRESHOLD chars.
+    t_preprocess_start = time.perf_counter()
+    page_decisions: list[tuple[int, str, int, bool, int]] = []
+    with pdfplumber.open(path) as pdf:
+        for i in range(page_count):
+            page_text = native_per_page[i]
+            page_text = _fix_mojibake(page_text)
+            page_text = _preprocess(page_text)
+            try:
+                if i < len(pdf.pages):
+                    table_text = _extract_tables_pdfplumber(pdf.pages[i])
+                    if table_text:
+                        page_text = (page_text + "\n\n" + table_text).strip()
+            except Exception as e:
+                logger.debug("Tables extraction page %s: %s", i, e)
+            final_native_len = len(page_text.strip())
+            force_ocr = final_native_len < ocr_threshold
+            psm = 6 if i < 2 else 3
+            page_decisions.append((i, page_text, final_native_len, force_ocr, psm))
+    t_preprocess_end = time.perf_counter()
+    preprocessing_time = t_preprocess_end - t_preprocess_start
+    ocr_page_indices = [i for i, _, _, force_ocr, _ in page_decisions if force_ocr]
+    logger.info(
+        "extract_hybrid: preprocessing_time=%.2fs ocr_trigger_count=%s (of %s pages) ocr_threshold=%s",
+        preprocessing_time, len(ocr_page_indices), page_count, ocr_threshold,
+    )
 
-                page_text = _fix_mojibake(page_text)
-                page_text = _preprocess(page_text)
-
+    # ---- Phase 3: Parallel OCR for pages that need it (ThreadPoolExecutor max_workers=12) ----
+    ocr_results: dict[int, str] = {}
+    ocr_times: dict[int, float] = {}
+    psm_by_idx = {i: psm for i, _, _, _, psm in page_decisions}
+    if ocr_page_indices:
+        t_ocr_start = time.perf_counter()
+        workers = min(OCR_MAX_WORKERS, len(ocr_page_indices))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_idx = {
+                executor.submit(
+                    _ocr_page_with_timing,
+                    path,
+                    idx,
+                    dpi_ocr,
+                    psm_by_idx.get(idx, 6),
+                    _OPENCV_AVAILABLE,
+                ): idx
+                for idx in ocr_page_indices
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
                 try:
-                    if i < len(pdf.pages):
-                        table_text = _extract_tables_pdfplumber(pdf.pages[i])
-                        if table_text:
-                            page_text = (page_text + "\n\n" + table_text).strip()
+                    _idx, text, elapsed = future.result()
+                    if text:
+                        ocr_results[_idx] = text
+                    ocr_times[_idx] = elapsed
                 except Exception as e:
-                    logger.debug("Tables extraction page %s: %s", i, e)
+                    logger.warning("OCR page %s failed: %s", idx + 1, e)
+                    ocr_times[idx] = 0.0
+        t_ocr_end = time.perf_counter()
+        ocr_total_time = t_ocr_end - t_ocr_start
+        logger.info(
+            "extract_hybrid: ocr_pages=%s ocr_total_time=%.2fs (parallel workers=%s)",
+            len(ocr_page_indices), ocr_total_time, workers,
+        )
+    else:
+        ocr_total_time = 0.0
 
-                final_native_len = len(page_text.strip())
-                force_ocr = (
-                    image_heavy
-                    or final_native_len < AGGRESSIVE_OCR_PAGE_THRESHOLD
-                    or has_images_list[i]
-                    or (use_ocr_for_low_text and _should_use_ocr(page_text, low_text_threshold, page_index=i))
-                )
+    used_ocr_pages = list(ocr_results.keys())
+    used_ocr_pages.sort()
 
-                ocr_len = 0
-                if force_ocr:
-                    psm = 6 if i < 2 else 3
-                    ocr_text = _ocr_page_from_doc(
-                        doc[i], dpi=dpi_ocr, lang="hin+eng", psm=psm, preprocess=_OPENCV_AVAILABLE
-                    )
-                    if ocr_text:
-                        ocr_len = len(ocr_text)
-                        used_ocr_pages.append(i)
-                        if final_native_len < low_text_threshold:
-                            page_text = ocr_text
-                        elif final_native_len > 500 and _count_garbled_patterns(page_text) <= 2:
-                            pass
-                        elif ocr_len >= final_native_len * OCR_REPLACE_RATIO or ocr_len > final_native_len:
-                            page_text = ocr_text
-                            logger.debug("page %s: using OCR (native=%s ocr=%s)", i + 1, final_native_len, ocr_len)
-                        else:
-                            page_text = page_text + "\n\n[OCR: page " + str(i + 1) + "]\n" + ocr_text
-
-                final_len = len(page_text.strip())
-                sample = (page_text[:120] + "…") if len(page_text) > 120 else page_text
-                logger.debug(
-                    "page %s: native_len=%s ocr_len=%s final_len=%s garbled_count=%s | sample=%s",
-                    i + 1, raw_len, ocr_len, final_len, garbled_count, repr(sample),
-                )
-                per_page_texts.append(page_text)
+    # ---- Phase 4: Merge native + OCR, build per_page_texts, progress callback ----
+    per_page_texts: list[str] = []
+    for i, page_text, final_native_len, force_ocr, _ in page_decisions:
+        ocr_text = ocr_results.get(i, "")
+        ocr_len = len(ocr_text.strip())
+        ocr_triggered = i in ocr_results
+        ocr_time = ocr_times.get(i, 0.0)
+        if force_ocr and ocr_text:
+            if final_native_len < low_text_threshold:
+                page_text = ocr_text
+            elif final_native_len > 500 and _count_garbled_patterns(page_text) <= 2:
+                pass
+            elif ocr_len >= final_native_len * OCR_REPLACE_RATIO or ocr_len > final_native_len:
+                page_text = ocr_text
+                logger.debug("page %s: using OCR (native=%s ocr=%s)", i + 1, final_native_len, ocr_len)
+            else:
+                page_text = page_text + "\n\n[OCR: page " + str(i + 1) + "]\n" + ocr_text
+        final_len = len(page_text.strip())
+        logger.info(
+            "extract_hybrid page %s: native_text_len=%s ocr_triggered=%s ocr_time=%.2fs",
+            i + 1, final_native_len, ocr_triggered, ocr_time,
+        )
+        per_page_texts.append(page_text)
+        if progress_callback:
+            try:
+                progress_callback(len(per_page_texts), page_count)
+            except Exception as e:
+                logger.debug("progress_callback failed: %s", e)
 
     full_text = "\n\n".join(per_page_texts)
     raw_full = full_text
-    # 5) Final cleaning: dedupe, merge short lines, normalize
+
+    # ---- Phase 5: Final cleaning ----
+    t_clean_start = time.perf_counter()
     full_text = _final_clean(full_text)
+    t_clean_end = time.perf_counter()
+    final_clean_time = t_clean_end - t_clean_start
+
+    t_total_end = time.perf_counter()
+    total_extraction_time = t_total_end - t_total_start
+    cleaned_length = len(full_text)
+    native_lens = [fn for _, _, fn, _, _ in page_decisions]
+    native_avg_len = sum(native_lens) / len(native_lens) if native_lens else 0
+    logger.info(
+        "extract_hybrid summary: total=%.2fs (native=%.2fs preprocess=%.2fs ocr=%.2fs final_clean=%.2fs) "
+        "pages=%s ocr_pages_count=%s native_avg_len=%.1f cleaned_length=%s",
+        total_extraction_time, native_extraction_time, preprocessing_time, ocr_total_time, final_clean_time,
+        page_count, len(used_ocr_pages), native_avg_len, cleaned_length,
+    )
 
     # Optional: save raw vs final to temp for manual check
     if os.environ.get("PDF_EXTRACT_DEBUG_SAVE"):
@@ -706,16 +794,10 @@ def extract_hybrid(
         except Exception as e:
             logger.warning("Could not save debug extract files: %s", e)
 
-    # Debug: raw vs cleaned length and metadata
-    cleaned_length = len(full_text)
-    logger.info(
-        "extract_hybrid: pages=%s ocr_used_pages=%s raw_combined_len=%s cleaned_length=%s",
-        page_count, used_ocr_pages, sum(len(p) for p in per_page_texts), cleaned_length,
-    )
     if full_text:
         logger.debug("extract_hybrid sample (first %s): %s", DEBUG_SAMPLE_LEN, repr(full_text[:DEBUG_SAMPLE_LEN]))
 
-    # 6) Validity: too little text → suggest vision or different file
+    # Validity: too little text → suggest vision or different file
     is_valid = bool(full_text.strip())
     error_message: str | None = None
     if not full_text.strip():

@@ -1,16 +1,17 @@
 """
-Vision-based MCQ generation: full-document via Claude (page images in batches).
+Vision-based MCQ generation: full-document via Gemini (page images in batches).
 Phase 1: Send PDF pages as image batches (same conversation).
 Phase 2: Generate N MCQs from full document (one final message).
 Phase 3: Quality review pass (rewrite weak questions), return corrected JSON.
 """
+import base64
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any
 
-from anthropic import Anthropic
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -21,16 +22,15 @@ logger = logging.getLogger(__name__)
 BATCH_MIN_PAGES = 1
 BATCH_MAX_PAGES = 3
 VISION_LLM_RETRY_ATTEMPTS = 3
-CONCURRENT_BATCH_LIMIT = 3  # semaphore for in-flight batch API calls (we still append sequentially)
-# Token safety: abort Phase 2 if Phase 1 already used >= this fraction of context window
-CONTEXT_WINDOW_TOKENS = 200_000  # Claude Sonnet 4
+CONCURRENT_BATCH_LIMIT = 3
+CONTEXT_WINDOW_TOKENS = 1_000_000  # Gemini 1.5
 TOKEN_SAFETY_THRESHOLD = 0.80
-# Rate limit protection: org limit 30k input tokens/min
-_ingestion_token_times: list[tuple[float, int]] = []
-_ingestion_token_lock = threading.Lock()
 RATE_LIMIT_WINDOW_SEC = 60
 RATE_LIMIT_MAX_INPUT_TOKENS = 25_000
 RATE_LIMIT_SLEEP_SEC = 20
+
+_ingestion_token_times: list[tuple[float, int]] = []
+_ingestion_token_lock = threading.Lock()
 
 VISION_SYSTEM_INGEST = """You are an expert at reading and retaining document content. You will receive images of PDF pages in batches. Do not answer questions yet. Acknowledge briefly that you have received and noted the pages (e.g. "Received pages N to M."). Your job is to build a complete picture of the full document for the next step."""
 
@@ -46,6 +46,12 @@ Rules:
 - No trivial recall unless conceptually meaningful.
 - If insufficient content exists, generate fewer questions rather than lowering quality.
 - Do not include markdown or commentary. Return valid JSON only."""
+
+VISION_COMBINED_SYSTEM = (
+    VISION_SYSTEM_INGEST
+    + "\n\nWhen the user asks you to generate MCQs or to review them, follow these rules:\n"
+    + FULL_UPSC_SYSTEM_PROMPT
+)
 
 MCQ_GEN_USER_TEMPLATE = """Generate {num_questions} UPSC Civil Services Prelims MCQs. Difficulty level for this run: {difficulty}.
 
@@ -82,40 +88,69 @@ Each question must have 4 or 5 options with labels A, B, C, D, and optionally E.
 REVIEW_USER_TEMPLATE = """Review the generated MCQs for conceptual depth, weak distractors, redundancy, hallucinations, and shallow recall. Rewrite weak questions to improve UPSC-level rigor. Preserve JSON format strictly. Each question must have 4 or 5 options with labels A, B, C, D [, E]. correct_answer must match one option label. Return corrected JSON only."""
 
 
-def _image_blocks(base64_images: list[str]) -> list[dict]:
-    """Build content blocks for Claude: one image block per base64 string."""
-    blocks: list[dict] = []
+def _vision_safety_settings():
+    """Safety settings for vision pipeline (google.genai types)."""
+    from google.genai import types
+    return [
+        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_CIVIC_INTEGRITY", threshold="BLOCK_NONE"),
+    ]
+
+
+def _gemini_image_parts(base64_images: list[str]):
+    """Build content parts for google.genai: list of Part (from_bytes for images)."""
+    from google.genai import types
+    parts: list[Any] = []
     for b64 in base64_images:
-        blocks.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/png",
-                "data": b64,
-            },
-        })
-    return blocks
+        try:
+            data = base64.b64decode(b64)
+        except Exception as e:
+            logger.warning("Skip invalid base64 image: %s", e)
+            continue
+        parts.append(types.Part.from_bytes(data=data, mime_type="image/png"))
+    return parts
 
 
 def _is_retryable_vision(exc: BaseException) -> bool:
-    """Retry on 429 (rate limit) and 5xx-like errors."""
+    """Retry on 429, 529, overloaded, and 5xx."""
     msg = str(exc).lower()
-    if "429" in msg or "rate limit" in msg or "rate_limit" in msg:
+    if "429" in msg or "529" in msg or "rate limit" in msg or "rate_limit" in msg:
         return True
-    if "500" in msg or "502" in msg or "503" in msg or "overloaded" in msg:
+    if "overloaded" in msg or "overloaded_error" in msg:
+        return True
+    if "500" in msg or "502" in msg or "503" in msg or "resource exhausted" in msg:
         return True
     return False
 
 
-def _claude_call_with_retry(
-    client: Anthropic,
-    model: str,
-    system: str | None,
-    messages: list[dict],
-    max_tokens: int,
-    context: str,
-) -> tuple[str, int, int]:
-    """Call client.messages.create with tenacity retry (3 attempts, 429/5xx). Returns (text, input_tokens, output_tokens)."""
+def _get_gemini_key() -> str:
+    """Use shared key resolution (settings + env + .env fallback) so vision pipeline sees key in all contexts."""
+    from app.llm.gemini_impl import get_gemini_api_key
+    return get_gemini_api_key()
+
+
+def _gemini_chat_client(system: str):
+    """Create google.genai Client and Chat with system instruction. Returns (client, chat)."""
+    from google import genai
+    from google.genai import types
+    key = _get_gemini_key()
+    if not key:
+        raise ValueError("GEMINI_API_KEY required for vision pipeline")
+    client = genai.Client(api_key=key)
+    model_name = (getattr(settings, "gen_model_name", None) or "gemini-1.5-flash-002").strip()
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        safety_settings=_vision_safety_settings(),
+    )
+    chat = client.chats.create(model=model_name, config=config)
+    return client, chat
+
+
+def _gemini_send_with_retry(chat, parts_or_text, max_tokens: int, context: str) -> tuple[str, int, int]:
+    """Send message (parts = list of Part, or single str). Returns (text, input_tokens, output_tokens). Uses google.genai chat."""
 
     @retry(
         retry=retry_if_exception(_is_retryable_vision),
@@ -123,30 +158,27 @@ def _claude_call_with_retry(
         wait=wait_exponential(multiplier=1, min=2, max=30),
         reraise=True,
     )
-    def _do_call() -> tuple[str, int, int]:
+    def _do_send() -> tuple[str, int, int]:
+        from google.genai import types
         t0 = time.perf_counter()
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system or "",
-            messages=messages,
-        )
+        if isinstance(parts_or_text, str):
+            contents = parts_or_text
+        elif len(parts_or_text) == 1 and isinstance(parts_or_text[0], str):
+            contents = parts_or_text[0]
+        else:
+            contents = parts_or_text
+        config = types.GenerateContentConfig(max_output_tokens=max_tokens) if max_tokens else None
+        kwargs = {"config": config} if config else {}
+        response = chat.send_message(contents, **kwargs)
         elapsed = time.perf_counter() - t0
-        inp = getattr(response.usage, "input_tokens", 0) or 0
-        out = getattr(response.usage, "output_tokens", 0) or 0
-        text = ""
-        if response.content and len(response.content) > 0:
-            block = response.content[0]
-            text = (getattr(block, "text", None) or "").strip()
+        usage = getattr(response, "usage_metadata", None)
+        inp = getattr(usage, "prompt_token_count", 0) or 0
+        out = getattr(usage, "candidates_token_count", 0) or getattr(usage, "output_token_count", 0) or 0
+        text = (getattr(response, "text", None) or "").strip()
         logger.info("%s elapsed=%.2fs input_tokens=%s output_tokens=%s", context, elapsed, inp, out)
         return (text, inp, out)
 
-    return _do_call()
-
-
-def _append_assistant_message(messages: list[dict], text: str) -> None:
-    """Append assistant response to conversation."""
-    messages.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+    return _do_send()
 
 
 def _parse_questions_json(
@@ -154,8 +186,7 @@ def _parse_questions_json(
     difficulty_override: str,
     allowed_topic_slugs: list[str] | None = None,
 ) -> list[dict] | None:
-    """Parse Phase 2/3 JSON. Returns list of MCQ dicts; options as list [{"label":"A","text":"..."}, ...].
-    difficulty from user (difficulty_override), not model. topic_tag from model; if not in allowed_topic_slugs, use default (EXPLORATION §8)."""
+    """Parse Phase 2/3 JSON. Returns list of MCQ dicts."""
     raw = raw.strip()
     if raw.startswith("```"):
         lines = raw.split("\n")
@@ -215,7 +246,7 @@ def _parse_questions_json(
 
 
 def _validate_mcqs(mcqs: list[dict]) -> bool:
-    """Validate: options count 4 or 5, labels sequential from A, exactly one correct_answer, correct_answer in labels."""
+    """Validate: options count 4 or 5, labels sequential, exactly one correct_option."""
     if not mcqs:
         return False
     valid_labels_4 = ["A", "B", "C", "D"]
@@ -241,35 +272,30 @@ def generate_mcqs_vision(
     topic_slugs: list[str] | None = None,
 ) -> tuple[list[dict], int, int]:
     """
-    Full-document vision pipeline: PDF → page images → batch ingest → generate MCQs → review pass.
-    difficulty is required (EASY | MEDIUM | HARD); LLM must not decide. Returns (mcqs, total_input_tokens, total_output_tokens).
+    Full-document vision pipeline (Gemini): PDF → page images → batch ingest → generate MCQs → review pass.
+    Returns (mcqs, total_input_tokens, total_output_tokens). Uses google.genai (new SDK).
     """
+    from google.genai import types
+
     t_start = time.perf_counter()
     topic_slugs = topic_slugs or ["polity"]
     topic_slug_instruction = (
         "topic_tag must be exactly one of (output verbatim, no other value): "
         + ", ".join(topic_slugs)
     )
-    key = (settings.claude_api_key or "").strip()
+    key = _get_gemini_key()
     if not key:
-        import os
-        key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    if not key:
-        raise ValueError("CLAUDE_API_KEY / ANTHROPIC_API_KEY required for vision pipeline")
-    client = Anthropic(api_key=key)
-    model = settings.claude_model
+        raise ValueError("GEMINI_API_KEY required for vision pipeline")
     num_questions = max(1, min(30, num_questions))
     diff_normalized = difficulty.strip().upper()
     if diff_normalized not in ("EASY", "MEDIUM", "HARD"):
         raise ValueError("difficulty must be EASY, MEDIUM, or HARD")
     diff_for_parse = diff_normalized.lower()
 
-    # Page images at 300 DPI
     base64_pages = pdf_to_base64_images(pdf_path)
     if not base64_pages:
         raise ValueError("No pages could be rendered from PDF")
 
-    # Batches of 8–10 pages (last batch may be smaller)
     batches: list[list[str]] = []
     start = 0
     while start < len(base64_pages):
@@ -277,27 +303,24 @@ def generate_mcqs_vision(
         batches.append(base64_pages[start : start + size])
         start += size
 
-    # Phase 1: Same conversation — send each batch, append response
-    messages: list[dict[str, Any]] = []
+    _, chat = _gemini_chat_client(VISION_COMBINED_SYSTEM)
     total_inp, total_out = 0, 0
+
     for batch_idx, batch in enumerate(batches):
         page_start = sum(len(b) for b in batches[:batch_idx])
         page_end = page_start + len(batch)
-        content: list[dict] = _image_blocks(batch)
-        # Optional short text cue
-        content.append({"type": "text", "text": f"Pages {page_start + 1} to {page_end} of the document."})
-        messages.append({"role": "user", "content": content})
-        text, inp, out = _claude_call_with_retry(
-            client, model, VISION_SYSTEM_INGEST, messages, max_tokens=256,
+        parts: list[Any] = _gemini_image_parts(batch)
+        if not parts:
+            continue
+        parts.append(types.Part.from_text(f"Pages {page_start + 1} to {page_end} of the document."))
+        text, inp, out = _gemini_send_with_retry(
+            chat, parts, max_tokens=256,
             context=f"vision_batch batch={batch_idx + 1} pages={page_start + 1}-{page_end}",
         )
         total_inp += inp
         total_out += out
-        _append_assistant_message(messages, text)
         logger.info("Batch %s: pages %s-%s, input_tokens=%s output_tokens=%s", batch_idx + 1, page_start + 1, page_end, inp, out)
-        # Hard sleep between ingestion calls to stay under 30k TPM
-        time.sleep(65)
-        # Rate limit protection: org limit 30k input tokens/min
+        time.sleep(2)
         with _ingestion_token_lock:
             now = time.time()
             _ingestion_token_times.append((now, inp))
@@ -316,39 +339,27 @@ def generate_mcqs_vision(
     if total_inp >= int(CONTEXT_WINDOW_TOKENS * TOKEN_SAFETY_THRESHOLD):
         raise ValueError("Document too large for model context window")
 
-    # Phase 2: Generate MCQs (full UPSC system prompt; inject topic slugs per EXPLORATION §0 #19, §8)
     gen_prompt = MCQ_GEN_USER_TEMPLATE.format(
         num_questions=num_questions,
         difficulty=diff_normalized,
         topic_slug_instruction=topic_slug_instruction,
     )
-    messages.append({"role": "user", "content": [{"type": "text", "text": gen_prompt}]})
-    gen_text, inp2, out2 = _claude_call_with_retry(
-        client, model, FULL_UPSC_SYSTEM_PROMPT, messages, max_tokens=8192, context="vision_mcq_generate",
-    )
+    gen_text, inp2, out2 = _gemini_send_with_retry(chat, gen_prompt, max_tokens=8192, context="vision_mcq_generate")
     total_inp += inp2
     total_out += out2
     mcqs = _parse_questions_json(gen_text, diff_for_parse, allowed_topic_slugs=topic_slugs)
     if not mcqs:
         logger.info("vision_mcq_generate: invalid JSON, retrying once")
-        messages = messages[:-1]
-        messages.append({"role": "user", "content": [{"type": "text", "text": gen_prompt}]})
-        gen_text2, inp2b, out2b = _claude_call_with_retry(
-            client, model, FULL_UPSC_SYSTEM_PROMPT, messages, max_tokens=8192, context="vision_mcq_generate_retry",
-        )
+        gen_text2, inp2b, out2b = _gemini_send_with_retry(chat, gen_prompt, max_tokens=8192, context="vision_mcq_generate_retry")
         total_inp += inp2b
         total_out += out2b
         mcqs = _parse_questions_json(gen_text2, diff_for_parse, allowed_topic_slugs=topic_slugs)
     if not mcqs:
-        raise ValueError("Claude did not return valid MCQ JSON after generation and retry")
+        raise ValueError("Gemini did not return valid MCQ JSON after generation and retry")
 
-    # Phase 3: Quality review pass (full UPSC system prompt)
     review_payload = {"questions": [{"question": m["question"], "difficulty": m["difficulty"], "options": m["options"], "correct_answer": m["correct_option"], "explanation": m["explanation"]} for m in mcqs]}
     review_user = f"""{REVIEW_USER_TEMPLATE}\n\n{json.dumps(review_payload)}"""
-    messages.append({"role": "user", "content": [{"type": "text", "text": review_user}]})
-    review_text, inp3, out3 = _claude_call_with_retry(
-        client, model, FULL_UPSC_SYSTEM_PROMPT, messages, max_tokens=8192, context="vision_mcq_review",
-    )
+    review_text, inp3, out3 = _gemini_send_with_retry(chat, review_user, max_tokens=8192, context="vision_mcq_review")
     total_inp += inp3
     total_out += out3
     reviewed = _parse_questions_json(review_text, diff_for_parse, allowed_topic_slugs=topic_slugs)

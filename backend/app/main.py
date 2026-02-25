@@ -53,19 +53,19 @@ def startup():
         if (getattr(settings, "secret_key", "") or "").strip() == "change-me-in-production":
             _log.critical("SECRET_KEY must be set in production. Set SECRET_KEY in env or .env.")
             raise RuntimeError("SECRET_KEY must be set in production. Set SECRET_KEY in env or .env.")
-    provider = (settings.llm_provider or "claude").strip().lower()
-    if provider == "claude":
-        key = (settings.claude_api_key or "").strip()
-        if key:
-            _log.info("Claude: API key loaded (len=%s). Real API will be used for MCQ generation.", len(key))
-        else:
-            _log.warning("Claude: No API key. Set CLAUDE_API_KEY in backend/.env for real generation (using mock).")
+    from app.config import _ENV_FILE
+    from app.llm.gemini_impl import get_gemini_api_key
+    _log.info("Config: .env path=%s (exists=%s)", _ENV_FILE, _ENV_FILE.exists())
+    gen_model = (getattr(settings, "gen_model_name", None) or "gemini-1.5-flash-002").strip()
+    _log.info("Using LLM: %s (Gemini only)", gen_model)
+    key = get_gemini_api_key()
+    if key:
+        _log.info("Gemini: API key loaded (len=%s). MCQ generation and summarization will use Gemini.", len(key))
     else:
-        key = (settings.openai_api_key or "").strip()
-        if key:
-            _log.info("OpenAI: API key loaded. Real API will be used.")
-        else:
-            _log.warning("OpenAI: No API key. Set OPENAI_API_KEY in backend/.env (using mock).")
+        _log.warning(
+            "Gemini: No API key. Add line GEMINI_API_KEY=your_key to %s then restart the server.",
+            _ENV_FILE,
+        )
     from app.database import init_sqlite_db
     init_sqlite_db()
     from app.jobs.tasks import clear_stuck_generating_tests

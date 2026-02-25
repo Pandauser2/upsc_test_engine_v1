@@ -30,6 +30,8 @@ class Document(Base):
     extracted_text: Mapped[str] = mapped_column(Text, nullable=False)
     target_questions: Mapped[int | None] = mapped_column(Integer, nullable=True, default=15)  # 1-20, validated in API
     extraction_elapsed_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)  # PDF extraction duration
+    total_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)  # PDF page count; set when extraction starts
+    extracted_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # Progress: pages done during extraction
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

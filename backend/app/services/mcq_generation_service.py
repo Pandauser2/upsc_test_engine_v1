@@ -142,7 +142,7 @@ def generate_mcqs_with_rag(
     progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[list[dict], list[float], int, int, str | None]:
     """
-    Chunk text, then run exactly 4 parallel single Claude calls (one per candidate group).
+    Chunk text, then run exactly 4 parallel single Gemini calls (one per candidate group).
     progress_callback(processed_count) called after each of 4 candidates completes (1–4).
     difficulty: EASY | MEDIUM | HARD (normalized to easy/medium/hard for LLM).
     Returns (mcqs, quality_scores, total_input_tokens, total_output_tokens, None).
@@ -151,21 +151,23 @@ def generate_mcqs_with_rag(
     target_n = target_n if target_n is not None else num_questions
     candidate_count = PARALLEL_CANDIDATES
     mode = getattr(settings, "chunk_mode", "semantic")
+    t_chunk_start = time.perf_counter()
     chunks = chunk_text(
         full_text,
         mode=mode,
         chunk_size=getattr(settings, "chunk_size", 1500),
         overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
     )
+    elapsed_chunk = time.perf_counter() - t_chunk_start
     if not chunks:
         logger.warning("generate_mcqs_with_rag: no chunks produced")
         return [], [], 0, 0, None
 
-    logger.info("generate_mcqs_with_rag: chunks=%s num_questions=%s target_n=%s candidates=%s", len(chunks), num_questions, target_n, candidate_count)
+    logger.info("generate_mcqs_with_rag: chunking %.2fs chunks=%s num_questions=%s target_n=%s candidates=%s", elapsed_chunk, len(chunks), num_questions, target_n, candidate_count)
     t_index = time.perf_counter()
     index, chunk_list = build_faiss_index(chunks) if use_rag else (None, chunks)
-    if use_rag:
-        logger.info("generate_mcqs_with_rag: index build %.2fs", time.perf_counter() - t_index)
+    elapsed_faiss = time.perf_counter() - t_index
+    logger.info("generate_mcqs_with_rag: FAISS build %.2fs (use_rag=%s)", elapsed_faiss, use_rag)
     top_k = getattr(settings, "rag_top_k", 5)
     outline_prefix = (global_outline or "").strip()
     if outline_prefix:
@@ -179,10 +181,12 @@ def generate_mcqs_with_rag(
         _normalized_difficulty = "MEDIUM"
     _normalized_difficulty = _normalized_difficulty.lower()
     llm = get_llm_service()
+    logger.info("generate_mcqs_with_rag: Using LLM: %s", getattr(settings, "active_llm_model", getattr(settings, "gen_model_name", "gemini-1.5-flash-002")))
     groups = _partition_chunks(chunk_list, candidate_count)
     n_per_candidate = max(1, (num_questions + candidate_count - 1) // candidate_count)
 
     def _one_candidate(idx: int, chunk_group: list[str]) -> tuple[list[dict], int, int]:
+        t_cand_start = time.perf_counter()
         if not chunk_group:
             return [], 0, 0
         if use_rag and index is not None and len(chunk_group) == 1:
@@ -193,9 +197,11 @@ def generate_mcqs_with_rag(
         if _export_enabled:
             logger.info("generate_mcqs_with_rag: candidate %s context_len=%s", idx, len(combined))
         try:
-            return llm.generate_mcqs(combined, topic_slugs=topic_slugs, num_questions=n_per_candidate, difficulty=_normalized_difficulty)
+            result = llm.generate_mcqs(combined, topic_slugs=topic_slugs, num_questions=n_per_candidate, difficulty=_normalized_difficulty)
+            logger.info("generate_mcqs_with_rag: generate_mcqs candidate=%s %.2fs mcqs=%s", idx, time.perf_counter() - t_cand_start, len(result[0]))
+            return result
         except Exception as e:
-            logger.warning("LLM candidate %s failed: %s", idx, e)
+            logger.warning("LLM candidate %s failed after %.2fs: %s", idx, time.perf_counter() - t_cand_start, e)
             return [], 0, 0
 
     all_mcqs: list[dict] = []
@@ -235,13 +241,15 @@ def generate_mcqs_with_rag(
     # Self-validation and quality scoring (sequential to preserve order; can parallelize later)
     scores: list[float] = []
     t_val = time.perf_counter()
-    for m in all_mcqs:
+    for idx_val, m in enumerate(all_mcqs):
         try:
+            t_v = time.perf_counter()
             critique, ci, co = llm.validate_mcq(m)
             total_inp += ci
             total_out += co
             m["validation_result"] = critique
             scores.append(quality_score_from_critique(critique))
+            logger.debug("generate_mcqs_with_rag: validate_mcq idx=%s %.2fs", idx_val, time.perf_counter() - t_v)
         except Exception as e:
             logger.debug("validate_mcq failed: %s", e)
             m["validation_result"] = ""
@@ -249,8 +257,12 @@ def generate_mcqs_with_rag(
     for i, m in enumerate(all_mcqs):
         if i < len(scores):
             m["quality_score"] = scores[i]
-    logger.info("generate_mcqs_with_rag: validation loop %.2fs", time.perf_counter() - t_val)
+    elapsed_val = time.perf_counter() - t_val
+    logger.info("generate_mcqs_with_rag: validation loop %.2fs (mcqs=%s)", elapsed_val, len(all_mcqs))
 
     elapsed_total = time.perf_counter() - t0
-    logger.info("generate_mcqs_with_rag: total %.2fs mcqs=%s", elapsed_total, len(all_mcqs))
+    logger.info(
+        "generate_mcqs_with_rag: total %.2fs mcqs=%s (chunk=%.2fs faiss=%.2fs parallel=%.2fs validation=%.2fs)",
+        elapsed_total, len(all_mcqs), elapsed_chunk, elapsed_faiss, elapsed_parallel, elapsed_val,
+    )
     return all_mcqs, scores, total_inp, total_out, None

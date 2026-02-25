@@ -1,10 +1,8 @@
 """
-LLM service wrapper: provider fallback (primary → secondary on 429/repeated failure) and rate-limit handling.
-Uses tenacity for retries on 429 and 5xx.
+LLM service wrapper: Gemini only, with tenacity retries on 429/5xx.
 """
 import logging
 import time
-from typing import Any
 
 from tenacity import (
     retry,
@@ -15,18 +13,19 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-# Rate limit: simple in-memory window (requests per minute)
 _rate_limit_window: list[float] = []
 _RATE_LIMIT_MAX_REQUESTS = 30
 _RATE_LIMIT_WINDOW_SEC = 60
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """Retry on 429 (rate limit) and 5xx-like errors."""
+    """Retry on 429, 529, overloaded, and 5xx-like errors."""
     msg = str(exc).lower()
-    if "429" in msg or "rate limit" in msg or "rate_limit" in msg:
+    if "429" in msg or "529" in msg or "rate limit" in msg or "rate_limit" in msg:
         return True
-    if "500" in msg or "502" in msg or "503" in msg or "overloaded" in msg:
+    if "overloaded" in msg or "overloaded_error" in msg:
+        return True
+    if "500" in msg or "502" in msg or "503" in msg or "resource exhausted" in msg:
         return True
     return False
 
@@ -46,7 +45,7 @@ def _rate_limit_wait() -> None:
 
 
 def _call_with_retry(fn, *args, **kwargs):
-    """Run fn with tenacity retry on 429/5xx."""
+    """Run fn with tenacity retry on 429/529/5xx."""
     _rate_limit_wait()
 
     @retry(
@@ -63,41 +62,15 @@ def _call_with_retry(fn, *args, **kwargs):
 
 def get_llm_service_with_fallback():
     """
-    Return an LLM service that uses primary provider with tenacity retries,
-    and falls back to secondary provider on repeated 429/failures.
+    Return Gemini LLM service with tenacity retries (no provider fallback).
     """
-    from app.config import settings
     from app.llm import get_llm_service
-    from app.llm.mock_impl import get_mock_llm_service
 
-    primary = (settings.llm_provider or "claude").strip().lower()
-    secondary = "openai" if primary == "claude" else "claude"
+    service = get_llm_service()
 
-    def _get_primary():
-        return get_llm_service()
-
-    def _get_secondary():
-        if secondary == "openai":
-            try:
-                from app.llm.openai_impl import get_llm_service as _get
-                return _get()
-            except Exception as e:
-                logger.debug("OpenAI fallback load failed, using mock: %s", e, exc_info=True)
-                return get_mock_llm_service()
-        from app.llm.claude_impl import get_llm_service as _get
-        return _get()
-
-    class _FallbackService:
-        def __init__(self):
-            self._primary = _get_primary()
-            self._secondary = None
-            self._use_secondary = False
-
-        def _current(self):
-            if self._use_secondary and self._secondary is None:
-                self._secondary = _get_secondary()
-                logger.info("LLM fallback: using secondary provider %s", secondary)
-            return self._secondary if self._use_secondary else self._primary
+    class _RetryWrapper:
+        def __init__(self, inner):
+            self._inner = inner
 
         def generate_mcqs(
             self,
@@ -105,31 +78,14 @@ def get_llm_service_with_fallback():
             topic_slugs: list[str],
             num_questions: int | None = None,
         ) -> tuple[list[dict], int, int]:
-            try:
-                return _call_with_retry(
-                    self._current().generate_mcqs,
-                    text_chunk,
-                    topic_slugs,
-                    num_questions,
-                )
-            except Exception as e:
-                if not self._use_secondary and _is_retryable(e):
-                    self._use_secondary = True
-                    return _call_with_retry(
-                        self._current().generate_mcqs,
-                        text_chunk,
-                        topic_slugs,
-                        num_questions,
-                    )
-                raise
+            return _call_with_retry(
+                self._inner.generate_mcqs,
+                text_chunk,
+                topic_slugs,
+                num_questions,
+            )
 
         def validate_mcq(self, mcq: dict) -> tuple[str, int, int]:
-            try:
-                return _call_with_retry(self._current().validate_mcq, mcq)
-            except Exception as e:
-                if not self._use_secondary and _is_retryable(e):
-                    self._use_secondary = True
-                    return _call_with_retry(self._current().validate_mcq, mcq)
-                return ("Validation skipped (API error).", 0, 0)
+            return _call_with_retry(self._inner.validate_mcq, mcq)
 
-    return _FallbackService()
+    return _RetryWrapper(service)

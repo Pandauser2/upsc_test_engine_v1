@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 DPI_TARGET = 300
 # PyMuPDF default is 72 DPI; scale factor for 300 DPI
 SCALE_300 = DPI_TARGET / 72.0
-# Claude many-image requests: no dimension may exceed this (pixels); 800–1000 keeps under rate limits
+# Vision (Gemini) many-image requests: no dimension may exceed this (pixels); 800–1000 keeps under rate limits
 MAX_DIMENSION_PX = 1000
 
 

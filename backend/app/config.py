@@ -6,9 +6,20 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# .env next to backend/ (parent of app/)
+# .env next to backend/ (parent of app/) — load explicitly so key is set even when run from repo root
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _ENV_FILE = _BACKEND_DIR / ".env"
+
+if _ENV_FILE.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_ENV_FILE, override=False)  # load backend/.env into os.environ so Settings sees GEMINI_API_KEY
+else:
+    # Fallback: try backend/.env relative to cwd (e.g. when running from repo root)
+    import os
+    _cwd_env = Path(os.getcwd()) / "backend" / ".env"
+    if _cwd_env.exists():
+        from dotenv import load_dotenv
+        load_dotenv(_cwd_env, override=False)
 
 
 class Settings(BaseSettings):
@@ -17,6 +28,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE if _ENV_FILE.exists() else None,
         env_file_encoding="utf-8",
+        extra="ignore",  # ignore legacy CLAUDE_API_KEY, OPENAI_API_KEY, etc.
     )
 
     # Database: sqlite for testing without Docker, postgresql for production
@@ -30,14 +42,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24
 
-    # LLM: default provider is Claude (Anthropic). Set LLM_PROVIDER=openai to use OpenAI.
-    llm_provider: str = "claude"
-    claude_api_key: str = ""
-    claude_model: str = "claude-sonnet-4-20250514"
-    claude_timeout_seconds: float = 120.0  # HTTP timeout so requests don't hang
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
-    openai_base_url: str = ""
+    # LLM: Gemini only. Set GEN_MODEL_NAME and GEMINI_API_KEY.
+    gen_model_name: str = "gemini-1.5-flash-002"
+    gemini_api_key: str = ""
 
     prompt_version: str = "mcq_v1"
     max_generation_time_seconds: int = 300
@@ -50,6 +57,8 @@ class Settings(BaseSettings):
     max_pdf_pages: int = 100
     # On-demand extraction (GET /documents/{id}/extract when text empty): max wait in seconds; avoids hanging.
     extract_on_demand_timeout_seconds: int = 600
+    # OCR trigger: only run OCR when native text per page < this (env OCR_THRESHOLD). Tighten to 50 for text-heavy NCERT PDFs.
+    ocr_threshold: int = 50
 
     # Chunking: semantic (spaCy) or fixed
     chunk_mode: str = "semantic"
@@ -84,11 +93,8 @@ class Settings(BaseSettings):
 
     @property
     def active_llm_model(self) -> str:
-        """Model name for the currently configured LLM provider (for display/storage)."""
-        p = (self.llm_provider or "claude").strip().lower()
-        if p == "openai":
-            return self.openai_model
-        return self.claude_model
+        """Model name for display/storage."""
+        return (getattr(self, "gen_model_name", None) or "gemini-1.5-flash-002").strip()
 
 
 settings = Settings()

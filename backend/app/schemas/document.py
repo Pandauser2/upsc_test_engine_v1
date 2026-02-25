@@ -14,6 +14,8 @@ class DocumentResponse(BaseModel):
     status: str
     target_questions: int | None = None  # 1-20, from upload form or default
     elapsed_time: int | None = None  # extraction duration in seconds (integer)
+    total_pages: int | None = None  # PDF page count; set when extraction starts
+    extracted_pages: int = 0  # Progress during extraction: "Extracting pages X/Y"
     created_at: datetime
 
     class Config:
