@@ -1,7 +1,7 @@
 """
 MCQ generation service with RAG: sentence_transformers embeddings, FAISS vector store,
-top-k retrieval per prompt. All target_n (1–20) use parallel single Claude calls via
-ThreadPoolExecutor(max_workers=4). No Message Batches.
+top-k retrieval per prompt. Clean synchronous parallel: 4 candidates via
+ThreadPoolExecutor(max_workers=4), Sonnet only; no Message Batches.
 """
 import logging
 import time
@@ -9,6 +9,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 import numpy as np
+
+# Fixed 4 parallel candidates for sync Sonnet-only path (progress: X/4)
+PARALLEL_CANDIDATES = 4
 
 # FAISS index type (optional import); use type alias for clarity
 FaissIndex: type = Any
@@ -146,7 +149,7 @@ def generate_mcqs_with_rag(
     """
     t0 = time.perf_counter()
     target_n = target_n if target_n is not None else num_questions
-    candidate_count = max(1, min(20, getattr(settings, "mcq_candidate_count", 4)))
+    candidate_count = PARALLEL_CANDIDATES
     mode = getattr(settings, "chunk_mode", "semantic")
     chunks = chunk_text(
         full_text,
@@ -212,12 +215,12 @@ def generate_mcqs_with_rag(
                     try:
                         progress_callback(processed)
                     except Exception:
-                        pass
+                        logger.debug("progress_callback failed", exc_info=True)
                 if heartbeat_callback:
                     try:
                         heartbeat_callback()
                     except Exception:
-                        pass
+                        logger.debug("heartbeat_callback failed", exc_info=True)
             except Exception as e:
                 logger.warning("Parallel candidate future failed: %s", e)
                 processed += 1
@@ -225,7 +228,7 @@ def generate_mcqs_with_rag(
                     try:
                         progress_callback(processed)
                     except Exception:
-                        pass
+                        logger.debug("progress_callback failed after future error", exc_info=True)
     elapsed_parallel = time.perf_counter() - t_parallel
     logger.info("generate_mcqs_with_rag: parallel block %.2fs (candidates=%s) mcqs=%s", elapsed_parallel, candidate_count, len(all_mcqs))
 

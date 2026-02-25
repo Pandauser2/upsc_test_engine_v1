@@ -3,11 +3,14 @@ Auth service: password hashing and JWT creation/verification.
 Uses bcrypt directly (no passlib) to avoid passlib/bcrypt version conflicts.
 Default role is faculty; all APIs scope by user_id.
 """
+import logging
 from datetime import datetime, timedelta
 from uuid import UUID
 import bcrypt
 from jose import JWTError, jwt
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # Bcrypt limit is 72 bytes; use 71 so we never exceed
 BCRYPT_MAX_BYTES = 71
@@ -37,7 +40,8 @@ def verify_password(plain: str, hashed: str) -> bool:
     raw = _truncate_to_bytes(plain)
     try:
         return bcrypt.checkpw(raw, hashed.encode("utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.debug("verify_password failed: %s", type(e).__name__)
         return False
 
 

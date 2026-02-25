@@ -214,7 +214,7 @@ def get_test_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return status and progress. While generating: progress = processed_candidates / candidate_count, message 'X/4 candidates processed'."""
+    """Return status and progress. While generating: progress = processed_candidates/4, message 'X/4 candidates processed'."""
     test = db.query(GeneratedTest).filter(
         GeneratedTest.id == test_id,
         GeneratedTest.user_id == current_user.id,
@@ -223,11 +223,10 @@ def get_test_status(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
     target = getattr(test, "target_questions", 0) or 0
     generated = getattr(test, "questions_generated", 0) or 0
-    candidate_count = getattr(settings, "mcq_candidate_count", 4)
     if test.status in ("pending", "generating"):
         processed = getattr(test, "processed_candidates", 0) or 0
-        progress = (processed / candidate_count) if candidate_count else 0.0
-        message = f"{processed}/{candidate_count} candidates processed"
+        progress = processed / 4
+        message = f"{processed}/4 candidates processed"
         timeout = (test.generation_metadata or {}).get("stale_timeout_sec") or getattr(settings, "max_stale_generation_seconds", 1200)
         age = _age_seconds(test.updated_at or test.created_at)
         if age > timeout / 2:

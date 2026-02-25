@@ -23,9 +23,8 @@ logger = logging.getLogger(__name__)
 
 MIN_QUESTIONS = 1
 MAX_QUESTIONS = 20  # MVP cap
-# Candidate count: generate this many before validation filter (config/env MCQ_CANDIDATE_COUNT, default 4)
-def _get_candidate_count() -> int:
-    return max(1, min(MAX_QUESTIONS, getattr(settings, "mcq_candidate_count", 4)))
+# Fixed 4 parallel candidates for sync Sonnet-only path (progress X/4 via DB)
+PARALLEL_CANDIDATES = 4
 # Max 3 concurrent generation jobs
 _generation_semaphore = threading.BoundedSemaphore(3)
 
@@ -124,10 +123,10 @@ def run_extraction(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
 
 def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
     """
-    Background task: extract → chunk → generate from text (LLM per chunk/batch) → filter bad critique → sort → persist up to N.
-    Uses document.extracted_text; no vision path. At end, if elapsed > max_generation_time_seconds, mark failed_timeout.
+    Background task: extract → chunk → 4 parallel Sonnet calls → filter bad critique → sort → persist up to N.
+    Uses document.extracted_text; no vision path. Progress via processed_candidates (0–4) in DB; stale timeout by elapsed.
     """
-    run_start = time.monotonic()
+    run_start = time.perf_counter()
     logger.info("run_generation: start test_id=%s doc_id=%s user_id=%s", test_id, doc_id, user_id)
     sem_acquired = False
     db: Session | None = None
@@ -190,7 +189,6 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         else:
             target_n = max(MIN_QUESTIONS, min(MAX_QUESTIONS, int(target_n)))
 
-        candidate_count = _get_candidate_count()
         num_questions = min(target_n + 2, MAX_QUESTIONS)  # small buffer for validation drop
         meta = test.generation_metadata if isinstance(test.generation_metadata, dict) else {}
         requested_difficulty = (meta.get("difficulty") or "MEDIUM")
@@ -200,7 +198,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
                 requested_difficulty = "MEDIUM"
         else:
             requested_difficulty = "MEDIUM"
-        logger.info("run_generation: text pipeline test_id=%s candidate_count=%s target_n=%s num_questions=%s difficulty=%s", test_id, candidate_count, target_n, num_questions, requested_difficulty)
+        logger.info("run_generation: text pipeline test_id=%s candidates=%s target_n=%s num_questions=%s difficulty=%s", test_id, PARALLEL_CANDIDATES, target_n, num_questions, requested_difficulty)
 
         from app.services.chunking_service import chunk_text
         mode = getattr(settings, "chunk_mode", "semantic")
@@ -277,9 +275,8 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             finally:
                 _db.close()
 
-        candidate_count = _get_candidate_count()
         from app.services.mcq_generation_service import generate_mcqs_with_rag
-        t_gen_start = time.monotonic()
+        t_gen_start = time.perf_counter()
         all_mcqs, _scores, total_inp, total_out, _ = generate_mcqs_with_rag(
             extracted_text,
             topic_slugs=topic_slugs,
@@ -291,7 +288,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             heartbeat_callback=_heartbeat,
             progress_callback=_update_processed_candidates,
         )
-        gen_elapsed = time.monotonic() - t_gen_start
+        gen_elapsed = time.perf_counter() - t_gen_start
         logger.info("run_generation: generate_mcqs_with_rag %.2fs (use_rag=%s)", gen_elapsed, use_rag_flag)
 
         # Drop any with bad critique (already have validation_result from generate_mcqs_with_rag)
@@ -329,7 +326,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
                 validation_result=m.get("validation_result"),
             ))
 
-        elapsed = time.monotonic() - run_start
+        elapsed = time.perf_counter() - run_start
         if elapsed > timeout_sec:
             test.status = "failed_timeout"
             test.failure_reason = f"Run exceeded {timeout_sec}s"
@@ -338,12 +335,12 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             test.status = "completed" if len(mcqs) >= target_n else "partial"
             test.failure_reason = None
         test.questions_generated = len(mcqs)
-        test.processed_candidates = candidate_count
+        test.processed_candidates = PARALLEL_CANDIDATES
         test.estimated_input_tokens = total_inp
         test.estimated_output_tokens = total_out
         test.estimated_cost_usd = None
         db.commit()
-        logger.info("run_generation: test %s %s with %s questions (elapsed %.1fs)", test_id, test.status, len(mcqs), elapsed)
+        logger.info("run_generation: total job %.2fs; test %s %s with %s questions", elapsed, test_id, test.status, len(mcqs))
 
         # Optional: export MCQs to JSON for quality baseline (ENABLE_EXPORT=true and export_result=true)
         if getattr(settings, "enable_export", False) and isinstance(test.generation_metadata, dict) and test.generation_metadata.get("export_result"):

@@ -103,7 +103,7 @@ class TestResponse(BaseModel):
     failure_reason: str | None = None  # set when status is failed
     created_at: datetime
     stale: bool = False  # True when status is pending/generating and older than max_generation_time (UI can show "may have timed out")
-    # Progress when status is pending/generating (batch or parallel)
+    # Progress when status is pending/generating (parallel: X/4 candidates processed)
     questions_generated: int | None = None
     target_questions: int | None = None
     progress: float | None = None  # 0.0–1.0 when generating

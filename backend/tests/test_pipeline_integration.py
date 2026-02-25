@@ -61,16 +61,14 @@ def test_full_pipeline_chunking_to_rag_mock_llm(monkeypatch):
     monkeypatch.setattr(svc, "get_llm_service", lambda: MockLLM())
 
     text = "Article 1 of the Constitution says India shall be a Union of States. The territory of India comprises the territories of the states."
-    mcqs, scores, inp, out, batch_id = svc.generate_mcqs_with_rag(
+    mcqs, scores, inp, out, _ = svc.generate_mcqs_with_rag(
         text,
         topic_slugs=["polity"],
         num_questions=1,
         use_rag=False,
-        batch_size=2,
     )
     assert len(mcqs) >= 1
     assert mcqs[0].get("question")
     assert "validation_result" in mcqs[0]
     assert "quality_score" in mcqs[0]
     assert inp >= 0 and out >= 0
-    assert batch_id is None  # parallel single calls only (no Message Batches)

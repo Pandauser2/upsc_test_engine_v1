@@ -41,7 +41,8 @@ def _pdf_page_count(contents: bytes) -> int | None:
             return len(doc)
         finally:
             doc.close()
-    except Exception:
+    except Exception as e:
+        logger.debug("_pdf_page_count failed: %s", e)
         return None
 
 

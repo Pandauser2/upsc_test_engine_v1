@@ -81,7 +81,8 @@ def get_llm_service_with_fallback():
             try:
                 from app.llm.openai_impl import get_llm_service as _get
                 return _get()
-            except Exception:
+            except Exception as e:
+                logger.debug("OpenAI fallback load failed, using mock: %s", e, exc_info=True)
                 return get_mock_llm_service()
         from app.llm.claude_impl import get_llm_service as _get
         return _get()

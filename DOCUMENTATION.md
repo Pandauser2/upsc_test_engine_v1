@@ -73,7 +73,7 @@ Config is loaded from `backend/.env` (and env vars). See `backend/app/config.py`
 
 ### Generation
 
-- **`MCQ_CANDIDATE_COUNT`** — Parallel candidates (default `4`). Progress is "X/4 candidates processed".
+- **Parallel candidates** — Fixed at 4 for the sync Sonnet path. Progress is "X/4 candidates processed" (no env override).
 - **`MAX_STALE_GENERATION_SECONDS`** — Base timeout for "generating" (default 1200); dynamic per run.
 - **`MIN_EXTRACTION_WORDS`** — Min words in extracted text to allow generation (default 500).
 
