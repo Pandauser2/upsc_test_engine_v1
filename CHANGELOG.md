@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- **Gemini-only LLM** — MCQ generation and summarization use Google Gemini (`google-generativeai`). Config: `GEN_MODEL_NAME` (default `gemini-1.5-flash-002`), `GEMINI_API_KEY`. See `backend/docs/GEMINI_MIGRATION_STEP1.md`.
+- **Gemini-only LLM** — MCQ generation and summarization use Google Gemini (`google-genai`). Config: `GEN_MODEL_NAME` (default `gemini-2.0-flash`), `GEMINI_API_KEY`. See `backend/docs/GEMINI_MIGRATION_STEP1.md`.
 - **503 when GEMINI_API_KEY missing** — `POST /tests/generate` returns 503 (detail: set key in backend/.env) instead of enqueueing and returning mock MCQs.
 - **Extraction progress** — `Document.total_pages` and `Document.extracted_pages` set during PDF extraction. GET `/documents/{id}` returns them; frontend can show "Extracting pages X/Y". Progress callback in `extract_hybrid`; `run_extraction` updates DB (throttled every 5 pages).
 - **API tests for test generation** — `tests/test_tests_api.py`: validation (422 for invalid `num_questions`), 404 for missing document, 202 for valid generate. Skipped when fastapi/httpx not installed.
@@ -25,6 +25,7 @@
 - **Chunking config** — `chunk_mode` (semantic | fixed), `chunk_size`, `chunk_overlap_fraction` in config; semantic uses spaCy + 20% overlap per EXPLORATION.
 
 ### Changed
+- **Default Gemini model** — `GEN_MODEL_NAME` default changed from `gemini-1.5-flash-002` to `gemini-2.0-flash` (gemini-1.5-flash-002 returns 404 with current API). Set `GEN_MODEL_NAME` in .env to override.
 - **Gemini SDK: google.genai** — Replaced deprecated `google-generativeai` with `google-genai`. All Gemini usage (MCQ generation, validation, summarization, vision pipeline) now uses `from google import genai` and `client.models.generate_content` / `client.chats.create`. Removes FutureWarning. Requirements: `google-genai>=1.0.0` (drop `google-generativeai`).
 - **Documentation** — `DOCUMENTATION.md`: Gemini-only backend, `GEN_MODEL_NAME`/`GEMINI_API_KEY`/`OCR_THRESHOLD`, documents progress (`total_pages`/`extracted_pages`), 4 parallel Gemini, link to `EXTRACTION_LATENCY_OPTIMIZATION.md`. `backend/README.md`: env (Gemini, `OCR_THRESHOLD`), extraction progress, Gemini parallelization.
 - **LLM: Gemini only** — Claude and OpenAI removed from config and code. `get_llm_service()` returns Gemini or mock. Summarization uses Gemini. Vision pipeline (`vision_mcq.py`) uses Gemini multimodal. Config: `gen_model_name`, `gemini_api_key` only (no `llm_provider`, `claude_*`, `openai_*`).

@@ -67,7 +67,7 @@ Config is loaded from `backend/.env` (and env vars). See `backend/app/config.py`
 
 ### LLM (Gemini only)
 
-- **`GEN_MODEL_NAME`** — Default `gemini-1.5-flash-002`.
+- **`GEN_MODEL_NAME`** — Default `gemini-2.0-flash` (supported by current Gemini API). Use a model that supports generateContent (e.g. `gemini-2.0-flash`).
 - **`GEMINI_API_KEY`** — Required for MCQ generation. If unset, `POST /tests/generate` returns **503** with message to set the key (no mock MCQs).
 
 ### Generation

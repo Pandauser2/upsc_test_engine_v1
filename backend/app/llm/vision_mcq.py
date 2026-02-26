@@ -128,7 +128,7 @@ def _is_retryable_vision(exc: BaseException) -> bool:
 
 def _get_gemini_key() -> str:
     """Use shared key resolution (settings + env + .env fallback) so vision pipeline sees key in all contexts."""
-    from app.llm.gemini_impl import get_gemini_api_key
+    from app.llm.gemini_impl import get_gemini_api_key, _resolve_model_name
     return get_gemini_api_key()
 
 
@@ -140,7 +140,8 @@ def _gemini_chat_client(system: str):
     if not key:
         raise ValueError("GEMINI_API_KEY required for vision pipeline")
     client = genai.Client(api_key=key)
-    model_name = (getattr(settings, "gen_model_name", None) or "gemini-1.5-flash-002").strip()
+    raw = (getattr(settings, "gen_model_name", None) or "gemini-2.5-flash").strip()
+    model_name = _resolve_model_name(raw)
     config = types.GenerateContentConfig(
         system_instruction=system,
         safety_settings=_vision_safety_settings(),

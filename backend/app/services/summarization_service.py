@@ -37,13 +37,14 @@ def _call_gemini_summarize(text: str, instruction: str) -> str:
     """Call Gemini (google.genai) with instruction + text; return summary string."""
     from google import genai
     from google.genai import types
-    from app.llm.gemini_impl import get_gemini_api_key
+    from app.llm.gemini_impl import get_gemini_api_key, _resolve_model_name
     key = get_gemini_api_key()
     if not key:
         logger.warning("GEMINI_API_KEY not set; skipping summarization.")
         return ""
     client = genai.Client(api_key=key)
-    model_name = (getattr(settings, "gen_model_name", None) or "gemini-1.5-flash-002").strip()
+    raw = (getattr(settings, "gen_model_name", None) or "gemini-2.5-flash").strip()
+    model_name = _resolve_model_name(raw)
     prompt = f"{instruction}\n\n{text[:50000]}"
     safety = [
         types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),

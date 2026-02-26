@@ -4,8 +4,12 @@ Generated test and question schemas.
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
-from pydantic import BaseModel, field_validator
 from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator
+from pydantic import ConfigDict
+
+MAX_QUESTIONS_PER_GENERATION = 10
 
 
 def _validate_options_dict(v: dict) -> dict:
@@ -76,16 +80,19 @@ class QuestionResponse(QuestionPayload):
 
 
 class TestGenerateRequest(BaseModel):
+    """Single place for number of questions: only here at test generation (1–10). Not on document upload or elsewhere."""
     document_id: str
-    num_questions: int = 15  # MVP: 1–20, default 15
+    num_questions: int = Field(10, ge=1)  # 1–10; max enforced in validator for custom error message
     difficulty: Literal["EASY", "MEDIUM", "HARD"] = "MEDIUM"  # LLM must not decide
     export_result: bool = False  # When ENABLE_EXPORT=true, save MCQs to backend/exports/{test_id}.json
 
     @field_validator("num_questions")
     @classmethod
     def num_questions_range(cls, v: int) -> int:
-        if v < 1 or v > 20:
-            raise ValueError("num_questions must be between 1 and 20")
+        if v < 1:
+            raise ValueError("num_questions must be at least 1")
+        if v > MAX_QUESTIONS_PER_GENERATION:
+            raise ValueError("Maximum 10 questions per generation to ensure quality")
         return v
 
 

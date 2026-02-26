@@ -56,7 +56,7 @@ def startup():
     from app.config import _ENV_FILE
     from app.llm.gemini_impl import get_gemini_api_key
     _log.info("Config: .env path=%s (exists=%s)", _ENV_FILE, _ENV_FILE.exists())
-    gen_model = (getattr(settings, "gen_model_name", None) or "gemini-1.5-flash-002").strip()
+    gen_model = (getattr(settings, "gen_model_name", None) or "gemini-2.5-flash").strip()
     _log.info("Using LLM: %s (Gemini only)", gen_model)
     key = get_gemini_api_key()
     if key:

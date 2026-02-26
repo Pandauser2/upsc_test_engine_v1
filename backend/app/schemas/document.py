@@ -12,7 +12,7 @@ class DocumentResponse(BaseModel):
     filename: str | None
     title: str | None
     status: str
-    target_questions: int | None = None  # 1-20, from upload form or default
+    target_questions: int | None = None  # set server-side (fixed per generation), no user input
     elapsed_time: int | None = None  # extraction duration in seconds (integer)
     total_pages: int | None = None  # PDF page count; set when extraction starts
     extracted_pages: int = 0  # Progress during extraction: "Extracting pages X/Y"

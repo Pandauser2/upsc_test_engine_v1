@@ -4,7 +4,28 @@ Loads .env from the backend directory so API keys are found regardless of cwd.
 """
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Default model for generateContent (v1beta). gemini-2.0-flash is no longer available to new users.
+_DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
+# Models that return 404 or are unsupported. Normalized at config load to _DEFAULT_GEMINI_MODEL.
+_UNSUPPORTED_GEMINI_MODELS = frozenset({
+    "gemini-1.5-flash-002", "gemini-1.5-flash-001", "gemini-1.5-flash",
+    "gemini-1.5-pro", "gemini-1.5-pro-001", "gemini-1.5-pro-002",
+    "gemini-2.0-flash", "gemini-2.0-flash-001", "gemini-2.0-flash-lite", "gemini-2.0-flash-lite-001",
+})
+
+
+def _normalize_gen_model(v: str) -> str:
+    """Ensure gen_model_name is supported by generateContent (avoids 404 from old .env)."""
+    s = (v or _DEFAULT_GEMINI_MODEL).strip()
+    if not s:
+        return _DEFAULT_GEMINI_MODEL
+    if s in _UNSUPPORTED_GEMINI_MODELS or s.startswith("gemini-1.5-flash-") or s.startswith("gemini-1.5-pro") or s.startswith("gemini-2.0-flash"):
+        return _DEFAULT_GEMINI_MODEL
+    return s
 
 # .env next to backend/ (parent of app/) — load explicitly so key is set even when run from repo root
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -42,9 +63,17 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24
 
-    # LLM: Gemini only. Set GEN_MODEL_NAME and GEMINI_API_KEY.
-    gen_model_name: str = "gemini-1.5-flash-002"
+    # LLM: Gemini only. Set GEN_MODEL_NAME and GEMINI_API_KEY. Use a model supported by generateContent (e.g. gemini-2.5-flash).
+    # Unsupported/deprecated models are normalized to gemini-2.5-flash to avoid 404.
+    gen_model_name: str = "gemini-2.5-flash"
     gemini_api_key: str = ""
+    # If True and Gemini returns 0 MCQs (e.g. invalid JSON), retry once with Claude (requires ANTHROPIC_API_KEY).
+    claude_fallback: bool = False
+
+    @field_validator("gen_model_name", mode="before")
+    @classmethod
+    def _resolve_gen_model(cls, v: str) -> str:
+        return _normalize_gen_model(v) if isinstance(v, str) else _DEFAULT_GEMINI_MODEL
 
     prompt_version: str = "mcq_v1"
     max_generation_time_seconds: int = 300
@@ -94,7 +123,7 @@ class Settings(BaseSettings):
     @property
     def active_llm_model(self) -> str:
         """Model name for display/storage."""
-        return (getattr(self, "gen_model_name", None) or "gemini-1.5-flash-002").strip()
+        return (getattr(self, "gen_model_name", None) or _DEFAULT_GEMINI_MODEL).strip()
 
 
 settings = Settings()

@@ -22,7 +22,7 @@ from app.services.prompt_helpers import get_topic_slugs_for_prompt
 logger = logging.getLogger(__name__)
 
 MIN_QUESTIONS = 1
-MAX_QUESTIONS = 20  # MVP cap
+MAX_QUESTIONS = 10  # max per generation to ensure quality (enforced by schema + early reject)
 # Fixed 4 parallel candidates for sync Sonnet-only path (progress X/4 via DB)
 PARALLEL_CANDIDATES = 4
 # Max 3 concurrent generation jobs
@@ -225,7 +225,11 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         else:
             target_n = max(MIN_QUESTIONS, min(MAX_QUESTIONS, int(target_n)))
 
-        num_questions = min(target_n + 2, MAX_QUESTIONS)  # small buffer for validation drop
+        if target_n > MAX_QUESTIONS:
+            _mark_failed(db, test, "target_questions exceeds maximum 10")
+            return
+
+        num_questions = min(target_n + 3, MAX_QUESTIONS)  # buffer for validation drop and dedupe
         meta = test.generation_metadata if isinstance(test.generation_metadata, dict) else {}
         requested_difficulty = (meta.get("difficulty") or "MEDIUM")
         if isinstance(requested_difficulty, str):
@@ -339,6 +343,33 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             mcqs.append(m)
         mcqs = _sort_medium_first(mcqs)[:target_n]
         logger.info("run_generation: dedupe/rank %.2fs (filtered to %s)", time.perf_counter() - t_dedupe_start, len(mcqs))
+
+        # One-shot top-up if short of target and within timeout
+        if len(mcqs) < target_n and (time.perf_counter() - run_start) < timeout_sec:
+            top_up_needed = target_n - len(mcqs)
+            try:
+                top_up_num = min(top_up_needed + 2, MAX_QUESTIONS)
+                logger.info("run_generation: partial (%s < %s), top-up run for %s more", len(mcqs), target_n, top_up_needed)
+                extra_mcqs, _e1, ei2, eo2, _ = generate_mcqs_with_rag(
+                    extracted_text,
+                    topic_slugs=topic_slugs,
+                    num_questions=top_up_num,
+                    target_n=target_n,
+                    use_rag=use_rag_flag,
+                    global_outline=global_outline_arg,
+                    difficulty=requested_difficulty,
+                )
+                total_inp += ei2
+                total_out += eo2
+                for m in extra_mcqs:
+                    critique = (m.get("validation_result") or "").lower()
+                    if any(bad in critique for bad in BAD_CRITIQUE_SUBSTRINGS):
+                        continue
+                    mcqs.append(m)
+                mcqs = _sort_medium_first(mcqs)[:target_n]
+                logger.info("run_generation: after top-up mcqs=%s", len(mcqs))
+            except Exception as top_ex:
+                logger.warning("run_generation: top-up failed: %s", top_ex)
 
         if not mcqs:
             _mark_failed(db, test, "No valid MCQs after filtering (text pipeline).")

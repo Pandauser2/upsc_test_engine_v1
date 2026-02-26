@@ -181,23 +181,29 @@ def generate_mcqs_with_rag(
         _normalized_difficulty = "MEDIUM"
     _normalized_difficulty = _normalized_difficulty.lower()
     llm = get_llm_service()
-    logger.info("generate_mcqs_with_rag: Using LLM: %s", getattr(settings, "active_llm_model", getattr(settings, "gen_model_name", "gemini-1.5-flash-002")))
+    logger.info("generate_mcqs_with_rag: Using LLM: %s", getattr(settings, "active_llm_model", getattr(settings, "gen_model_name", "gemini-2.5-flash")))
     groups = _partition_chunks(chunk_list, candidate_count)
     n_per_candidate = max(1, (num_questions + candidate_count - 1) // candidate_count)
 
-    def _one_candidate(idx: int, chunk_group: list[str]) -> tuple[list[dict], int, int]:
+    def _one_candidate(service: Any, idx: int, chunk_group: list[str]) -> tuple[list[dict], int, int]:
         t_cand_start = time.perf_counter()
         if not chunk_group:
             return [], 0, 0
-        if use_rag and index is not None and len(chunk_group) == 1:
-            query = chunk_group[0][:500]
+        cg = chunk_group
+        if use_rag and index is not None and len(cg) == 1:
+            query = cg[0][:500]
             retrieved = retrieve_top_k(query, index, chunk_list, k=top_k)
-            chunk_group = retrieved if retrieved else chunk_group
-        combined = outline_prefix + "\n\n".join(chunk_group)
+            cg = retrieved if retrieved else cg
+        combined = outline_prefix + "\n\n".join(cg)
+        # Cap context to reduce malformed JSON from long outputs (Gemini often breaks on large inputs)
+        _max_context_chars = 20000
+        if len(combined) > 30000:
+            combined = combined[:_max_context_chars]
+            logger.info("generate_mcqs_with_rag: candidate %s context capped to %s chars (was >30k)", idx, _max_context_chars)
         if _export_enabled:
             logger.info("generate_mcqs_with_rag: candidate %s context_len=%s", idx, len(combined))
         try:
-            result = llm.generate_mcqs(combined, topic_slugs=topic_slugs, num_questions=n_per_candidate, difficulty=_normalized_difficulty)
+            result = service.generate_mcqs(combined, topic_slugs=topic_slugs, num_questions=n_per_candidate, difficulty=_normalized_difficulty)
             logger.info("generate_mcqs_with_rag: generate_mcqs candidate=%s %.2fs mcqs=%s", idx, time.perf_counter() - t_cand_start, len(result[0]))
             return result
         except Exception as e:
@@ -208,7 +214,7 @@ def generate_mcqs_with_rag(
     total_inp, total_out = 0, 0
     t_parallel = time.perf_counter()
     with ThreadPoolExecutor(max_workers=candidate_count) as executor:
-        futures = {executor.submit(_one_candidate, i, groups[i]): i for i in range(candidate_count)}
+        futures = {executor.submit(_one_candidate, llm, i, groups[i]): i for i in range(candidate_count)}
         processed = 0
         for fut in as_completed(futures):
             try:
@@ -237,6 +243,30 @@ def generate_mcqs_with_rag(
                         logger.debug("progress_callback failed after future error", exc_info=True)
     elapsed_parallel = time.perf_counter() - t_parallel
     logger.info("generate_mcqs_with_rag: parallel block %.2fs (candidates=%s) mcqs=%s", elapsed_parallel, candidate_count, len(all_mcqs))
+    if len(all_mcqs) == 0:
+        logger.warning("generate_mcqs_with_rag: all %s candidates returned 0 MCQs (check Gemini JSON parse / malformed response)", candidate_count)
+
+    # Fallback: if Gemini returned 0 MCQs (e.g. invalid JSON) and CLAUDE_FALLBACK is set, retry with Claude.
+    if len(all_mcqs) == 0 and getattr(settings, "claude_fallback", False):
+        try:
+            from app.llm.claude_impl import get_llm_service as get_claude_service
+            fallback_llm = get_claude_service()
+            if fallback_llm and not type(fallback_llm).__name__.startswith("Mock"):
+                logger.warning("generate_mcqs_with_rag: Gemini returned 0 MCQs; retrying with Claude (CLAUDE_FALLBACK=true)")
+                t_fb = time.perf_counter()
+                with ThreadPoolExecutor(max_workers=candidate_count) as executor:
+                    futures_fb = {executor.submit(_one_candidate, fallback_llm, i, groups[i]): i for i in range(candidate_count)}
+                    for fut in as_completed(futures_fb):
+                        try:
+                            mcqs, inp, out = fut.result()
+                            total_inp += inp
+                            total_out += out
+                            all_mcqs.extend(mcqs)
+                        except Exception as e:
+                            logger.warning("Claude fallback candidate failed: %s", e)
+                logger.info("generate_mcqs_with_rag: Claude fallback %.2fs mcqs=%s", time.perf_counter() - t_fb, len(all_mcqs))
+        except Exception as e:
+            logger.warning("Claude fallback not available: %s", e)
 
     # Self-validation and quality scoring (sequential to preserve order; can parallelize later)
     scores: list[float] = []

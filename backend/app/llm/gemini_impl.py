@@ -1,6 +1,6 @@
 """
 Gemini (Google) LLM: MCQ generation and validation via google.genai (new SDK).
-Uses GEN_MODEL_NAME (e.g. gemini-1.5-flash-002) and GEMINI_API_KEY.
+Uses GEN_MODEL_NAME (e.g. gemini-2.5-flash) and GEMINI_API_KEY.
 Structured JSON output for MCQs; tenacity retries on 429/500.
 """
 import json
@@ -37,7 +37,10 @@ Rules:
 7. Provide a clear explanation that references ideas from the content.
 8. topic_tag must be exactly one of the slugs provided in the user message.
 
-Output valid JSON only, no other text: {"mcqs": [ {"question": "...", "options": {"A":"...", "B":"...", "C":"...", "D":"..."}, "correct_option": "A"|"B"|"C"|"D", "explanation": "...", "difficulty": "easy"|"medium"|"hard", "topic_tag": "<slug>"} ]}"""
+Output only valid JSON. No markdown, no explanations, no extra text before or after.
+Strict schema: {"mcqs": [{"question": str, "options": {"A": str, "B": str, "C": str, "D": str}, "correct_option": "A"|"B"|"C"|"D", "explanation": str, "difficulty": "easy"|"medium"|"hard", "topic_tag": str}]}
+Escape double quotes inside strings with backslash. Use \\n for newlines inside strings; no raw newlines in JSON."""
+
 
 MCQ_VALIDATE_SYSTEM = """You are a critic for UPSC-style MCQs. Given a question, options, correct answer, and explanation, output a short critique: Is the correct key actually correct? Is the explanation consistent with the content? Output plain text only, no JSON. If the key or explanation is wrong, say so clearly (e.g. "incorrect key" or "wrong answer"). If acceptable, say it is correct."""
 
@@ -64,6 +67,26 @@ def get_gemini_api_key() -> str:
     return _get_api_key()
 
 
+# Default/fallback for generateContent (v1beta). gemini-2.0-flash no longer available to new users.
+_UNSUPPORTED_MODEL_FALLBACK = "gemini-2.5-flash"
+_UNSUPPORTED_MODEL_IDS = frozenset({
+    "gemini-1.5-flash-002", "gemini-1.5-flash-001", "gemini-1.5-flash",
+    "gemini-1.5-pro", "gemini-1.5-pro-001", "gemini-1.5-pro-002",
+    "gemini-2.0-flash", "gemini-2.0-flash-001", "gemini-2.0-flash-lite", "gemini-2.0-flash-lite-001",
+})
+
+
+def _resolve_model_name(name: str) -> str:
+    """Return a model id that works with generateContent. Replace known-unsupported ids (e.g. from old .env)."""
+    n = (name or "").strip()
+    if not n:
+        return _UNSUPPORTED_MODEL_FALLBACK
+    if n in _UNSUPPORTED_MODEL_IDS or n.startswith("gemini-1.5-flash-") or n.startswith("gemini-1.5-pro") or n.startswith("gemini-2.0-flash"):
+        logger.info("Gemini: mapping unsupported model %s -> %s", n, _UNSUPPORTED_MODEL_FALLBACK)
+        return _UNSUPPORTED_MODEL_FALLBACK
+    return n
+
+
 def _safety_settings_none():
     """Safety settings to avoid blocking study content (google.genai types)."""
     from google.genai import types
@@ -76,25 +99,57 @@ def _safety_settings_none():
     ]
 
 
+def _strip_json_fences(text: str) -> str:
+    """Remove markdown code fences and leading/trailing non-JSON around the object."""
+    t = text.strip()
+    if t.startswith("```"):
+        lines = t.split("\n")
+        if lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        t = "\n".join(lines)
+    # Extract first { ... last } in case of leading/trailing text
+    start = t.find("{")
+    end = t.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        t = t[start : end + 1]
+    return t.strip()
+
+
 def _parse_mcqs_json(raw: str, topic_slugs: list[str]) -> list[dict]:
-    """Parse JSON and return list of MCQ dicts. Accepts correct_option or answer. Returns [] on parse error."""
+    """Parse JSON and return list of MCQ dicts. Accepts correct_option or answer. Uses json_repair if available. Returns [] on parse error."""
     out: list[dict] = []
     slug_set = {s.strip().lower() for s in topic_slugs} or {"polity"}
     if not raw or not raw.strip():
         logger.warning("Gemini MCQ JSON parse: empty raw response")
         return []
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        if lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
+    text = _strip_json_fences(raw.strip())
+    data = None
+    parse_error: Exception | None = None
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.warning("Gemini MCQ JSON parse failed: %s. raw snippet: %s", e, (text[:200] + "..." if len(text) > 200 else text))
+    except json.JSONDecodeError as e1:
+        parse_error = e1
+        try:
+            import json_repair
+            data = json_repair.loads(text)
+        except Exception:
+            pass
+        if data is None:
+            try:
+                import json_repair
+                data = json_repair.loads(raw)
+            except Exception:
+                pass
+        if data is None:
+            logger.warning(
+                "Gemini MCQ JSON parse failed: %s. raw response (first 2000 chars): %s",
+                parse_error,
+                (raw[:2000] + "..." if len(raw) > 2000 else raw),
+            )
+            return []
+    if data is None:
         return []
     items = data.get("mcqs") if isinstance(data, dict) else (data if isinstance(data, list) else [])
     if not isinstance(items, list):
@@ -104,6 +159,12 @@ def _parse_mcqs_json(raw: str, topic_slugs: list[str]) -> list[dict]:
             continue
         question = m.get("question") or ""
         options = m.get("options")
+        if isinstance(options, list):
+            labels = "ABCD"
+            options = {labels[i] if i < 4 else str(i + 1): str(o.get("text", o) if isinstance(o, dict) else o) for i, o in enumerate(options[:4])}
+            for k in "ABCD":
+                if k not in options:
+                    options[k] = ""
         if not isinstance(options, dict):
             options = {"A": "", "B": "", "C": "", "D": ""}
         for k in ("A", "B", "C", "D"):
@@ -137,7 +198,8 @@ def get_llm_service():
         logger.warning("GEMINI_API_KEY is empty or unset; cannot use Gemini.")
         from app.llm.mock_impl import get_mock_llm_service
         return get_mock_llm_service()
-    model_name = (getattr(settings, "gen_model_name", "") or "gemini-1.5-flash-002").strip()
+    raw = (getattr(settings, "gen_model_name", "") or "gemini-2.5-flash").strip()
+    model_name = _resolve_model_name(raw)
     logger.info("Using LLM: %s (Gemini)", model_name)
     return GeminiService(model_name=model_name, api_key=key)
 
@@ -151,7 +213,8 @@ class GeminiService:
         key = api_key or _get_api_key()
         self._client = genai.Client(api_key=key)
         self._types = types
-        self._model_name = (model_name or getattr(settings, "gen_model_name", "gemini-1.5-flash-002")).strip()
+        raw = (model_name or getattr(settings, "gen_model_name", "gemini-2.5-flash") or "").strip()
+        self._model_name = _resolve_model_name(raw)
 
     def generate_mcqs(
         self,
@@ -178,7 +241,8 @@ The study material below may contain multiple pages/sections. You MUST use the E
 {text_chunk[:120000]}
 --- END STUDY MATERIAL ---
 
-Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff}" for each. Output valid JSON only, no other text: {{"mcqs": [ {{"question": "...", "options": {{"A":"...", "B":"...", "C":"...", "D":"..."}}, "correct_option": "A", "explanation": "...", "difficulty": "{diff}", "topic_tag": "<one of the slugs>}} ]}}"""
+Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff}" for each.
+Output valid JSON only: one object with key "mcqs" and an array of objects. No markdown, no text before or after. Inside strings escape double quotes with backslash and use \\n for newlines (no raw newlines in JSON)."""
 
         config = types.GenerateContentConfig(
             system_instruction=MCQ_GEN_SYSTEM,
@@ -228,6 +292,32 @@ Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff
         if getattr(settings, "enable_export", False) and raw:
             logger.info("Gemini generate_mcqs: raw response (first 500 chars): %s", (raw[:500] + "..." if len(raw) > 500 else raw))
         mcqs = _parse_mcqs_json(raw, topic_slugs or ["polity"])
+        # Retry once with shorter context if parse failed (e.g. unterminated string / invalid JSON)
+        if len(mcqs) == 0 and raw and len(text_chunk) > 40000:
+            logger.warning("Gemini generate_mcqs: parse returned 0 MCQs; retrying with shorter context (first 40k chars)")
+            try:
+                retry_chunk = text_chunk[:40000]
+                retry_content = f"""Topic slugs: {slugs_str}. Difficulty: {diff}. Generate exactly {n} MCQs as valid JSON only.
+Output a single JSON object: {{"mcqs": [{{"question":"...", "options":{{"A":"...","B":"...","C":"...","D":"..."}}, "correct_option":"A", "explanation":"...", "difficulty":"{diff}", "topic_tag":"<slug>"}}]}}
+Escape quotes in strings with backslash. No newlines inside JSON strings. No other text.
+
+--- MATERIAL ---
+{retry_chunk}
+--- END ---"""
+                retry_response = self._client.models.generate_content(
+                    model=self._model_name,
+                    contents=retry_content,
+                    config=config,
+                )
+                retry_raw = (getattr(retry_response, "text", None) or "").strip()
+                mcqs = _parse_mcqs_json(retry_raw, topic_slugs or ["polity"])
+                retry_um = getattr(retry_response, "usage_metadata", None)
+                if retry_um:
+                    inp += getattr(retry_um, "prompt_token_count", 0) or 0
+                    out += getattr(retry_um, "candidates_token_count", 0) or getattr(retry_um, "output_token_count", 0) or 0
+                logger.info("Gemini generate_mcqs: retry parsed mcqs count=%s", len(mcqs))
+            except Exception as retry_ex:
+                logger.warning("Gemini generate_mcqs retry failed: %s", retry_ex)
         logger.info("Gemini generate_mcqs: parsed mcqs count=%s", len(mcqs))
         return (mcqs, inp, out)
 

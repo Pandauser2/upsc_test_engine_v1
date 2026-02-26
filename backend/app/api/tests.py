@@ -124,10 +124,6 @@ def _question_to_response(q: Question) -> QuestionResponse:
     )
 
 
-# Validation message for generation start (EXPLORATION §7.3)
-TARGET_QUESTIONS_RANGE_MSG = "target_questions must be between 1 and 20"
-
-
 @router.post("/generate", response_model=TestResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_generation(
     data: TestGenerateRequest,
@@ -135,15 +131,10 @@ def start_generation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create GeneratedTest (pending), enqueue job, return test_id. Validates target_questions 1–20."""
+    """Create GeneratedTest (pending), enqueue job, return test_id. num_questions (1–10) is the only place user sets question count."""
     from app.models.document import Document
-    # Ensure num_questions (target_questions) is set and within 1–20; reject target_n > 20
-    nq = getattr(data, "num_questions", None)
-    if nq is None or not isinstance(nq, int) or nq < 1 or nq > 20:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=TARGET_QUESTIONS_RANGE_MSG,
-        )
+    from app.schemas.test import MAX_QUESTIONS_PER_GENERATION
+    target_n = max(1, min(MAX_QUESTIONS_PER_GENERATION, data.num_questions))
     doc_id = uuid.UUID(data.document_id)
     doc_row = db.query(Document).filter(Document.id == doc_id, Document.user_id == current_user.id).first()
     if not doc_row:
@@ -187,7 +178,6 @@ def start_generation(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GEMINI_API_KEY is not set. Set it in backend/.env (or your environment) for real MCQ generation.",
         )
-    target_n = max(1, min(20, data.num_questions))
     test = GeneratedTest(
         user_id=current_user.id,
         document_id=doc_id,
@@ -197,7 +187,7 @@ def start_generation(
         model=settings.active_llm_model,
         target_questions=target_n,
         generation_metadata={
-            "num_questions": data.num_questions,
+            "num_questions": target_n,  # from single input at test generation only
             "difficulty": data.difficulty,
             "export_result": getattr(data, "export_result", False),
         },
@@ -388,17 +378,16 @@ def add_question(
   current_user: User = Depends(get_current_user),
   db: Session = Depends(get_db),
 ):
-    """Manual fill: add question to test (cap = test target_questions, 1-20)."""
+    """Manual fill: add question to test (cap = test target_questions, max 10)."""
     test = db.query(GeneratedTest).filter(
         GeneratedTest.id == test_id,
         GeneratedTest.user_id == current_user.id,
     ).first()
     if not test:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Test not found")
-    cap = getattr(test, "target_questions", None)
-    if cap is None and test.generation_metadata and isinstance(test.generation_metadata.get("num_questions"), int):
-        cap = test.generation_metadata["num_questions"]
-    cap = max(1, min(20, cap if cap is not None else 20))
+    from app.schemas.test import MAX_QUESTIONS_PER_GENERATION
+    cap = getattr(test, "target_questions", None) or (test.generation_metadata or {}).get("num_questions")
+    cap = max(1, min(MAX_QUESTIONS_PER_GENERATION, cap if cap is not None else MAX_QUESTIONS_PER_GENERATION))
     current_count = db.query(Question).filter(Question.generated_test_id == test_id).count()
     if current_count >= cap:
         raise HTTPException(

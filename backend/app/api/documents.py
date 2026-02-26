@@ -6,7 +6,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -76,32 +76,16 @@ def _resolve_pdf_path(doc: Document) -> str | None:
     return None
 
 
-def _normalize_target_questions(value: int | None) -> int:
-    """Return value clamped to 1-20; default 15 if None or invalid."""
-    if value is None:
-        return 15
-    try:
-        n = int(value)
-        return max(1, min(20, n))
-    except (TypeError, ValueError):
-        return 15
-
-
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 def upload_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    num_questions: int | None = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload a PDF. MVP: max 100 pages. Extraction runs in background; doc status processing → ready or extraction_failed. Optional num_questions (1-20) stored on document."""
-    if num_questions is not None and (num_questions < 1 or num_questions > 20):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Number of questions must be between 1 and 20.",
-        )
-    target_q = _normalize_target_questions(num_questions)
+    """Upload a PDF. MVP: max 100 pages. Extraction runs in background; doc status processing → ready or extraction_failed. Target questions fixed server-side (no user input)."""
+    from app.schemas.test import MAX_QUESTIONS_PER_GENERATION
+    target_q = MAX_QUESTIONS_PER_GENERATION
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File must be a PDF")

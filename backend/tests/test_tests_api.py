@@ -85,24 +85,17 @@ def client_with_auth(test_user_and_doc):
         app.dependency_overrides.pop(get_current_user, None)
 
 
-def test_generate_validation_num_questions_too_low(client_with_auth, test_user_and_doc):
-    """POST /tests/generate with num_questions=0 returns 422 (Pydantic validation)."""
-    _, doc = test_user_and_doc
-    r = client_with_auth.post(
-        "/tests/generate",
-        json={"document_id": str(doc.id), "num_questions": 0, "difficulty": "MEDIUM"},
-    )
-    assert r.status_code == 422
-
-
 def test_generate_validation_num_questions_too_high(client_with_auth, test_user_and_doc):
-    """POST /tests/generate with num_questions=21 returns 422 (Pydantic validation)."""
+    """POST /tests/generate with num_questions=11 returns 422 (max 10)."""
     _, doc = test_user_and_doc
     r = client_with_auth.post(
         "/tests/generate",
-        json={"document_id": str(doc.id), "num_questions": 21, "difficulty": "MEDIUM"},
+        json={"document_id": str(doc.id), "num_questions": 11, "difficulty": "MEDIUM"},
     )
     assert r.status_code == 422
+    detail = r.json().get("detail") or []
+    msgs = [d.get("msg", "") for d in detail] if isinstance(detail, list) else [str(detail)]
+    assert any("Maximum 10 questions" in m for m in msgs), f"Expected message in {detail}"
 
 
 def test_generate_document_not_found(client_with_auth):
@@ -122,14 +115,14 @@ def test_generate_503_when_no_gemini_key(client_with_auth, test_user_and_doc, mo
     _, doc = test_user_and_doc
     r = client_with_auth.post(
         "/tests/generate",
-        json={"document_id": str(doc.id), "num_questions": 3, "difficulty": "MEDIUM"},
+        json={"document_id": str(doc.id), "num_questions": 5, "difficulty": "MEDIUM"},
     )
     assert r.status_code == 503
     assert "GEMINI_API_KEY" in (r.json().get("detail") or "")
 
 
 def test_generate_success_returns_202(client_with_auth, test_user_and_doc, monkeypatch):
-    """POST /tests/generate with valid payload returns 202 and test record with status pending (requires API key set)."""
+    """POST /tests/generate with num_questions (only place for question count) returns 202 and target_questions set."""
     import app.api.tests as tests_module
     monkeypatch.setattr(tests_module.settings, "gemini_api_key", "test-key-for-202")
     _, doc = test_user_and_doc

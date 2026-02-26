@@ -20,7 +20,7 @@ FastAPI app (Python 3.11): auth, documents, topics, tests, MCQ generation job, .
 - **Production:** Set `ENV=production` and `SECRET_KEY` to a secure value. The app will not start in production with the default `SECRET_KEY`.
 - `DATABASE_URL` — SQLite default `sqlite:///./upsc_dev.db`; Postgres for production.
 - `SECRET_KEY`, `JWT_ALGORITHM`, `JWT_EXPIRE_HOURS` — Auth.
-- `GEN_MODEL_NAME` (default `gemini-1.5-flash-002`), `GEMINI_API_KEY` — LLM (Gemini only). No key → `POST /tests/generate` returns 503 (no mock MCQs).
+- `GEN_MODEL_NAME` (default `gemini-2.0-flash`), `GEMINI_API_KEY` — LLM (Gemini only). No key → `POST /tests/generate` returns 503 (no mock MCQs).
 - `PROMPT_VERSION`, `MAX_GENERATION_TIME_SECONDS`, `MIN_EXTRACTION_WORDS` — Generation.
 - `UPLOAD_DIR`, `MAX_PDF_PAGES` (default 100) — Uploads.
 - `OCR_THRESHOLD` (default 50) — Run OCR only when native text per page &lt; this; see `docs/EXTRACTION_LATENCY_OPTIMIZATION.md`.
