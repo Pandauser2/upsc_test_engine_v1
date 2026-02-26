@@ -1,7 +1,13 @@
 """
 Unit tests for Gemini LLM impl: JSON parsing, model resolution, and optional mock generate_mcqs.
+Note: API tests (test_tests_api) only assert 202 and response body; they do not wait for or assert
+on the background job result. They also use a fake API key, so the job would get 401 from Gemini
+if it hit the real API—never the 400 we saw from the REST thinkingConfig format. So we add
+test_generate_mcqs_fallback_to_sdk_on_rest_400 to explicitly test the REST-400 → SDK fallback.
 """
 import pytest
+
+import httpx
 
 from app.llm.gemini_impl import _parse_mcqs_json, _resolve_model_name
 
@@ -116,3 +122,31 @@ def test_get_llm_service_uses_resolved_model_when_env_has_unsupported(monkeypatc
     service = get_llm_service()
     assert isinstance(service, GeminiService)
     assert service._model_name == "gemini-2.5-flash"
+
+
+def test_generate_mcqs_fallback_to_sdk_on_rest_400(monkeypatch):
+    """When REST generateContent returns 400 (e.g. invalid thinkingConfig), generate_mcqs falls back to SDK and still returns MCQs."""
+    pytest.importorskip("google.genai")
+    import app.llm.gemini_impl as gemini_impl
+    from app.llm.gemini_impl import GeminiService
+
+    # Simulate REST returning 400 so production fallback is exercised
+    def rest_returns_400(*args, **kwargs):
+        resp = type("Resp", (), {"status_code": 400, "text": "Bad Request"})()
+        raise httpx.HTTPStatusError("400", request=None, response=resp)
+
+    monkeypatch.setattr(gemini_impl, "_get_api_key", lambda: "test-key")
+    monkeypatch.setattr(gemini_impl, "_generate_content_rest_thinking_budget_zero", rest_returns_400)
+
+    mock_json = '{"mcqs":[{"question":"Q?","options":{"A":"a","B":"b","C":"c","D":"d"},"correct_option":"A","explanation":"E","difficulty":"medium","topic_tag":"polity"}]}'
+    mock_usage = type("Usage", (), {"prompt_token_count": 10, "candidates_token_count": 20, "output_token_count": 20})()
+    mock_response = type("Response", (), {"text": mock_json, "usage_metadata": mock_usage})()
+
+    service = GeminiService(model_name="gemini-2.5-flash", api_key="test-key")
+    monkeypatch.setattr(service._client.models, "generate_content", lambda model, contents, config: mock_response)
+
+    mcqs, inp, out = service.generate_mcqs("study text", ["polity"], num_questions=2)
+    assert len(mcqs) == 1
+    assert mcqs[0]["question"] == "Q?"
+    assert inp == 10
+    assert out == 20

@@ -9,7 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 from pydantic import ConfigDict
 
-MAX_QUESTIONS_PER_GENERATION = 10
+MAX_QUESTIONS_PER_GENERATION = 8
 
 
 def _validate_options_dict(v: dict) -> dict:
@@ -80,9 +80,9 @@ class QuestionResponse(QuestionPayload):
 
 
 class TestGenerateRequest(BaseModel):
-    """Single place for number of questions: only here at test generation (1–10). Not on document upload or elsewhere."""
+    """Single place for number of questions: only here at test generation (1–8). Not on document upload or elsewhere."""
     document_id: str
-    num_questions: int = Field(10, ge=1)  # 1–10; max enforced in validator for custom error message
+    num_questions: int = Field(8, ge=1)  # 1–8; max enforced in validator for custom error message
     difficulty: Literal["EASY", "MEDIUM", "HARD"] = "MEDIUM"  # LLM must not decide
     export_result: bool = False  # When ENABLE_EXPORT=true, save MCQs to backend/exports/{test_id}.json
 
@@ -92,7 +92,7 @@ class TestGenerateRequest(BaseModel):
         if v < 1:
             raise ValueError("num_questions must be at least 1")
         if v > MAX_QUESTIONS_PER_GENERATION:
-            raise ValueError("Maximum 10 questions per generation to ensure quality")
+            raise ValueError("Maximum 8 questions per generation to ensure quality and speed")
         return v
 
 
@@ -108,13 +108,14 @@ class TestResponse(BaseModel):
     estimated_output_tokens: int | None
     estimated_cost_usd: Decimal | None
     failure_reason: str | None = None  # set when status is failed
+    partial_reason: str | None = None  # set when status is partial (questions_generated < target_n)
     created_at: datetime
     stale: bool = False  # True when status is pending/generating and older than max_generation_time (UI can show "may have timed out")
     # Progress when status is pending/generating (parallel: X/4 candidates processed)
     questions_generated: int | None = None
     target_questions: int | None = None
     progress: float | None = None  # 0.0–1.0 when generating
-    progress_message: str | None = None  # e.g. "3 of 10 questions created"
+    progress_message: str | None = None  # e.g. "3 of 8 questions created"
     elapsed_time: int | None = None  # time from create to done (seconds), computed from updated_at - created_at when status is terminal
 
     class Config:

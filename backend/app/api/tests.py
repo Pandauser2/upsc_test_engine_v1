@@ -99,6 +99,7 @@ def _test_to_response(t: GeneratedTest, stale: bool = False) -> TestResponse:
         estimated_output_tokens=t.estimated_output_tokens,
         estimated_cost_usd=t.estimated_cost_usd,
         failure_reason=getattr(t, "failure_reason", None),
+        partial_reason=getattr(t, "partial_reason", None),
         created_at=_normalize_created_at(getattr(t, "created_at", None)),
         stale=stale,
         questions_generated=generated if target else None,
@@ -131,7 +132,7 @@ def start_generation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create GeneratedTest (pending), enqueue job, return test_id. num_questions (1–10) is the only place user sets question count."""
+    """Create GeneratedTest (pending), enqueue job, return test_id. num_questions (1–8) is the only place user sets question count."""
     from app.models.document import Document
     from app.schemas.test import MAX_QUESTIONS_PER_GENERATION
     target_n = max(1, min(MAX_QUESTIONS_PER_GENERATION, data.num_questions))
@@ -378,7 +379,7 @@ def add_question(
   current_user: User = Depends(get_current_user),
   db: Session = Depends(get_db),
 ):
-    """Manual fill: add question to test (cap = test target_questions, max 10)."""
+    """Manual fill: add question to test (cap = test target_questions, max 8)."""
     test = db.query(GeneratedTest).filter(
         GeneratedTest.id == test_id,
         GeneratedTest.user_id == current_user.id,

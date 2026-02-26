@@ -2,17 +2,67 @@
 Gemini (Google) LLM: MCQ generation and validation via google.genai (new SDK).
 Uses GEN_MODEL_NAME (e.g. gemini-2.5-flash) and GEMINI_API_KEY.
 Structured JSON output for MCQs; tenacity retries on 429/500.
+MCQ generation uses REST with thinkingBudget=0 so the model does not spend output tokens on thinking (SDK 1.2 does not send thinkingBudget).
 """
 import json
 import logging
 import os
 import time
 
+import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# REST safety settings for generateContent (thinkingBudget=0 path)
+_REST_SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+]
+
+
+def _generate_content_rest_thinking_budget_zero(
+    api_key: str,
+    model: str,
+    user_content: str,
+    system_instruction: str,
+    max_output_tokens: int = 4000,
+    temperature: float = 0.3,
+    response_mime_type: str = "application/json",
+) -> tuple[str, int, int]:
+    """Call Gemini v1beta generateContent via REST with thinkingConfig.thinkingBudget=0. Returns (text, inp, out). Raises httpx.HTTPStatusError on 4xx/5xx."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+    # Omit safetySettings from REST; API defaults apply. Only generationConfig fields are accepted inside generationConfig (v1beta).
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": user_content}]}],
+        "systemInstruction": {"parts": [{"text": system_instruction}]},
+        "generationConfig": {
+            "maxOutputTokens": max_output_tokens,
+            "temperature": temperature,
+            "responseMimeType": response_mime_type,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    resp = httpx.post(url, json=body, headers=headers, timeout=120.0)
+    resp.raise_for_status()
+    data = resp.json()
+    text = ""
+    inp, out = 0, 0
+    for cand in (data.get("candidates") or []):
+        for part in (cand.get("content") or {}).get("parts") or []:
+            if "text" in part:
+                text = (text + part["text"]).strip()
+        break
+    um = data.get("usageMetadata") or {}
+    inp = int(um.get("promptTokenCount") or um.get("prompt_token_count") or 0)
+    out = int(um.get("candidatesTokenCount") or um.get("candidates_token_count") or um.get("totalTokenCount") or 0)
+    return (text, inp, out)
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -25,7 +75,11 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
-MCQ_GEN_SYSTEM = """You are an expert UPSC Civil Services Examination question setter. The study material below may be long and span multiple pages or sections. Your task is to read the ENTIRE material and generate high-quality, conceptually rigorous MCQs suitable for UPSC Prelims.
+def _mcq_gen_system(num_questions: int) -> str:
+    """System prompt for MCQ generation; parameterized by requested count."""
+    return f"""You are an expert UPSC Civil Services Examination question setter. The study material below may be long and span multiple pages or sections. Your task is to read the ENTIRE material and generate high-quality, conceptually rigorous MCQs suitable for UPSC Prelims.
+
+Generate up to 15 high-quality MCQs (aim for at least {num_questions}, never fewer unless text lacks material).
 
 Rules:
 1. Use the ENTIRE study material—all pages and sections. Do NOT base questions only on the first page or one paragraph. Draw from different parts of the document so questions reflect the full content.
@@ -38,8 +92,12 @@ Rules:
 8. topic_tag must be exactly one of the slugs provided in the user message.
 
 Output only valid JSON. No markdown, no explanations, no extra text before or after.
-Strict schema: {"mcqs": [{"question": str, "options": {"A": str, "B": str, "C": str, "D": str}, "correct_option": "A"|"B"|"C"|"D", "explanation": str, "difficulty": "easy"|"medium"|"hard", "topic_tag": str}]}
+Strict schema: {{"mcqs": [{{"question": str, "options": {{"A": str, "B": str, "C": str, "D": str}}, "correct_option": "A"|"B"|"C"|"D", "explanation": str, "difficulty": "easy"|"medium"|"hard", "topic_tag": str}}]}}
 Escape double quotes inside strings with backslash. Use \\n for newlines inside strings; no raw newlines in JSON."""
+
+
+# Legacy constant for retry path (same content with n=5)
+MCQ_GEN_SYSTEM = _mcq_gen_system(5)
 
 
 MCQ_VALIDATE_SYSTEM = """You are a critic for UPSC-style MCQs. Given a question, options, correct answer, and explanation, output a short critique: Is the correct key actually correct? Is the explanation consistent with the content? Output plain text only, no JSON. If the key or explanation is wrong, say so clearly (e.g. "incorrect key" or "wrong answer"). If acceptable, say it is correct."""
@@ -223,7 +281,6 @@ class GeminiService:
         num_questions: int | None = None,
         difficulty: str | None = None,
     ) -> tuple[list[dict], int, int]:
-        from google.genai import types
         n = num_questions if num_questions is not None else 5
         n = max(1, min(25, n))
         diff = (difficulty or "medium").strip().lower()
@@ -242,15 +299,12 @@ The study material below may contain multiple pages/sections. You MUST use the E
 --- END STUDY MATERIAL ---
 
 Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff}" for each.
-Output valid JSON only: one object with key "mcqs" and an array of objects. No markdown, no text before or after. Inside strings escape double quotes with backslash and use \\n for newlines (no raw newlines in JSON)."""
+The "mcqs" array MUST contain exactly {n} items—do not return fewer. Output valid JSON only: one object with key "mcqs" and an array of exactly {n} objects. No markdown, no text before or after. Inside strings escape double quotes with backslash and use \\n for newlines (no raw newlines in JSON)."""
 
-        config = types.GenerateContentConfig(
-            system_instruction=MCQ_GEN_SYSTEM,
-            safety_settings=_safety_settings_none(),
-            max_output_tokens=4096,
-            temperature=0.3,
-            response_mime_type="application/json",
-        )
+        # max_output_tokens: env GEMINI_MAX_OUTPUT_TOKENS (default 4000)
+        max_out = getattr(settings, "gemini_max_output_tokens", 4000)
+        api_key = _get_api_key()
+        from google.genai import types
 
         @retry(
             retry=retry_if_exception(_is_retryable),
@@ -258,12 +312,42 @@ Output valid JSON only: one object with key "mcqs" and an array of objects. No m
             wait=wait_exponential(multiplier=1, min=1, max=8),
             reraise=True,
         )
-        def _create():
-            return self._client.models.generate_content(
+        def _create_rest():
+            return _generate_content_rest_thinking_budget_zero(
+                api_key=api_key,
                 model=self._model_name,
-                contents=user_content,
+                user_content=user_content,
+                system_instruction=_mcq_gen_system(n),
+                max_output_tokens=max_out,
+                temperature=0.3,
+                response_mime_type="application/json",
+            )
+
+        def _create_sdk(content: str):
+            try:
+                _tc = types.ThinkingConfig(thinking_budget=0)
+            except Exception:
+                _tc = types.ThinkingConfig(include_thoughts=False)
+            config = types.GenerateContentConfig(
+                system_instruction=_mcq_gen_system(n),
+                safety_settings=_safety_settings_none(),
+                max_output_tokens=max_out,
+                temperature=0.3,
+                response_mime_type="application/json",
+                thinking_config=_tc,
+            )
+            r = self._client.models.generate_content(
+                model=self._model_name,
+                contents=content,
                 config=config,
             )
+            raw_text = (getattr(r, "text", None) or "").strip()
+            ui, uo = 0, 0
+            um = getattr(r, "usage_metadata", None)
+            if um:
+                ui = getattr(um, "prompt_token_count", 0) or 0
+                uo = getattr(um, "candidates_token_count", 0) or getattr(um, "output_token_count", 0) or 0
+            return (raw_text, ui, uo)
 
         try:
             t_api_start = time.perf_counter()
@@ -273,51 +357,71 @@ Output valid JSON only: one object with key "mcqs" and an array of objects. No m
                 n,
                 len(text_chunk),
             )
-            response = _create()
+            try:
+                raw, inp, out = _create_rest()
+                logger.info("thinking disabled (budget=0) via REST")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 400:
+                    err_body = (e.response.text or "")[:500]
+                    logger.warning(
+                        "Gemini REST with thinkingBudget=0 returned 400, falling back to SDK. Response: %s",
+                        err_body,
+                    )
+                    raw, inp, out = _create_sdk(user_content)
+                else:
+                    raise
             logger.info("Gemini generate_mcqs API %.2fs", time.perf_counter() - t_api_start)
         except Exception as e:
             logger.exception("Gemini generate_mcqs failed: %s", e)
             raise
 
-        raw = (getattr(response, "text", None) or "").strip()
-        inp = 0
-        out = 0
-        um = getattr(response, "usage_metadata", None)
-        if um:
-            inp = getattr(um, "prompt_token_count", 0) or 0
-            out = getattr(um, "candidates_token_count", 0) or getattr(um, "output_token_count", 0) or 0
+        raw = (raw or "").strip()
         logger.info("Gemini API response: input_tokens=%s, output_tokens=%s", inp, out)
 
         logger.info("Gemini generate_mcqs: raw response len=%s", len(raw))
         if getattr(settings, "enable_export", False) and raw:
             logger.info("Gemini generate_mcqs: raw response (first 500 chars): %s", (raw[:500] + "..." if len(raw) > 500 else raw))
         mcqs = _parse_mcqs_json(raw, topic_slugs or ["polity"])
-        # Retry once with shorter context if parse failed (e.g. unterminated string / invalid JSON)
-        if len(mcqs) == 0 and raw and len(text_chunk) > 40000:
-            logger.warning("Gemini generate_mcqs: parse returned 0 MCQs; retrying with shorter context (first 40k chars)")
+        if len(mcqs) < n and len(mcqs) > 0:
+            logger.warning("Gemini generate_mcqs: returned %s MCQs, requested %s (output_tokens=%s)", len(mcqs), n, out)
+        # Retry once with shorter context if parse failed or too few (e.g. truncation, model stopped early)
+        if len(mcqs) < n and raw and len(text_chunk) > 40000:
+            logger.warning("Gemini generate_mcqs: got %s MCQs (requested %s); retrying with shorter context (first 40k chars)", len(mcqs), n)
             try:
                 retry_chunk = text_chunk[:40000]
-                retry_content = f"""Topic slugs: {slugs_str}. Difficulty: {diff}. Generate exactly {n} MCQs as valid JSON only.
+                retry_content = f"""Topic slugs: {slugs_str}. Difficulty: {diff}. You MUST generate exactly {n} MCQs. The mcqs array must have exactly {n} items.
 Output a single JSON object: {{"mcqs": [{{"question":"...", "options":{{"A":"...","B":"...","C":"...","D":"..."}}, "correct_option":"A", "explanation":"...", "difficulty":"{diff}", "topic_tag":"<slug>"}}]}}
 Escape quotes in strings with backslash. No newlines inside JSON strings. No other text.
 
 --- MATERIAL ---
 {retry_chunk}
 --- END ---"""
-                retry_response = self._client.models.generate_content(
-                    model=self._model_name,
-                    contents=retry_content,
-                    config=config,
-                )
-                retry_raw = (getattr(retry_response, "text", None) or "").strip()
-                mcqs = _parse_mcqs_json(retry_raw, topic_slugs or ["polity"])
-                retry_um = getattr(retry_response, "usage_metadata", None)
-                if retry_um:
-                    inp += getattr(retry_um, "prompt_token_count", 0) or 0
-                    out += getattr(retry_um, "candidates_token_count", 0) or getattr(retry_um, "output_token_count", 0) or 0
+                try:
+                    retry_raw, retry_inp, retry_out = _generate_content_rest_thinking_budget_zero(
+                        api_key=api_key,
+                        model=self._model_name,
+                        user_content=retry_content,
+                        system_instruction=_mcq_gen_system(n),
+                        max_output_tokens=max_out,
+                        temperature=0.3,
+                        response_mime_type="application/json",
+                    )
+                except httpx.HTTPStatusError as re:
+                    if re.response.status_code == 400:
+                        retry_raw, retry_inp, retry_out = _create_sdk(retry_content)
+                    else:
+                        raise
+                retry_raw = (retry_raw or "").strip()
+                retry_mcqs = _parse_mcqs_json(retry_raw, topic_slugs or ["polity"])
+                if len(retry_mcqs) > len(mcqs):
+                    mcqs = retry_mcqs
+                inp += retry_inp
+                out += retry_out
                 logger.info("Gemini generate_mcqs: retry parsed mcqs count=%s", len(mcqs))
             except Exception as retry_ex:
                 logger.warning("Gemini generate_mcqs retry failed: %s", retry_ex)
+        if len(mcqs) < n:
+            logger.warning("Gemini generate_mcqs: still short after retry (got %s, requested %s)", len(mcqs), n)
         logger.info("Gemini generate_mcqs: parsed mcqs count=%s", len(mcqs))
         return (mcqs, inp, out)
 

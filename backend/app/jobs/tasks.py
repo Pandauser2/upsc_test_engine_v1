@@ -22,7 +22,7 @@ from app.services.prompt_helpers import get_topic_slugs_for_prompt
 logger = logging.getLogger(__name__)
 
 MIN_QUESTIONS = 1
-MAX_QUESTIONS = 10  # max per generation to ensure quality (enforced by schema + early reject)
+MAX_QUESTIONS = 8  # max per generation to ensure quality and speed (enforced by schema + early reject)
 # Fixed 4 parallel candidates for sync Sonnet-only path (progress X/4 via DB)
 PARALLEL_CANDIDATES = 4
 # Max 3 concurrent generation jobs
@@ -226,7 +226,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             target_n = max(MIN_QUESTIONS, min(MAX_QUESTIONS, int(target_n)))
 
         if target_n > MAX_QUESTIONS:
-            _mark_failed(db, test, "target_questions exceeds maximum 10")
+            _mark_failed(db, test, "target_questions exceeds maximum 8")
             return
 
         num_questions = min(target_n + 3, MAX_QUESTIONS)  # buffer for validation drop and dedupe
@@ -240,48 +240,55 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             requested_difficulty = "MEDIUM"
         logger.info("run_generation: text pipeline test_id=%s candidates=%s target_n=%s num_questions=%s difficulty=%s", test_id, PARALLEL_CANDIDATES, target_n, num_questions, requested_difficulty)
 
-        from app.services.chunking_service import chunk_text
-        mode = getattr(settings, "chunk_mode", "semantic")
-        t_chunk_outline_start = time.perf_counter()
-        chunks_for_outline = chunk_text(
-            extracted_text,
-            mode=mode,
-            chunk_size=getattr(settings, "chunk_size", 1500),
-            overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
-        )
-        num_chunks = len(chunks_for_outline or [])
-        logger.info("run_generation: chunking (outline) %.2fs chunks=%s", time.perf_counter() - t_chunk_outline_start, num_chunks)
-        min_chunks = getattr(settings, "rag_min_chunks_for_global", 20)
-        use_global_rag = getattr(settings, "use_global_rag", True)
+        text_len = len((extracted_text or "").strip())
+        max_single = getattr(settings, "max_single_call_chars", 600000)
         global_outline_arg: str | None = None
         use_rag_flag = False
-        if use_global_rag and num_chunks > min_chunks:
-            t_outline_start = time.monotonic()
-            try:
-                from app.services.summarization_service import summarize_chunk, generate_global_outline
-                max_chunks = max(1, min(20, getattr(settings, "rag_outline_max_chunks", 10)))
-                chunk_summaries = []
-                for c in (chunks_for_outline or [])[:max_chunks]:
-                    s = summarize_chunk(c)
-                    if s:
-                        chunk_summaries.append(s)
-                global_outline_arg = generate_global_outline(chunk_summaries) if chunk_summaries else ""
-                use_rag_flag = True
-                outline_elapsed = time.monotonic() - t_outline_start
-                logger.info(
-                    "Global RAG activated",
-                    extra={"chunks": num_chunks, "threshold": min_chunks},
-                )
-                logger.info("run_generation: Global RAG enabled (chunks=%s); outline %.2fs", num_chunks, outline_elapsed)
-            except Exception as ex:
-                logger.warning("run_generation: outline/rag prep failed, falling back to no RAG: %s", ex)
-                use_rag_flag = False
-                global_outline_arg = None
+        num_chunks = 0
+
+        if text_len < max_single:
+            logger.info("run_generation: fast path (text_len=%s < %s), skipping chunking/outline", text_len, max_single)
         else:
-            if not use_global_rag:
-                logger.info("run_generation: Global RAG skipped (disabled)")
+            from app.services.chunking_service import chunk_text
+            mode = getattr(settings, "chunk_mode", "semantic")
+            t_chunk_outline_start = time.perf_counter()
+            chunks_for_outline = chunk_text(
+                extracted_text,
+                mode=mode,
+                chunk_size=getattr(settings, "chunk_size", 1500),
+                overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
+            )
+            num_chunks = len(chunks_for_outline or [])
+            logger.info("run_generation: chunking (outline) %.2fs chunks=%s", time.perf_counter() - t_chunk_outline_start, num_chunks)
+            min_chunks = getattr(settings, "rag_min_chunks_for_global", 20)
+            use_global_rag = getattr(settings, "use_global_rag", True)
+            if use_global_rag and num_chunks > min_chunks:
+                t_outline_start = time.monotonic()
+                try:
+                    from app.services.summarization_service import summarize_chunk, generate_global_outline
+                    max_chunks = max(1, min(20, getattr(settings, "rag_outline_max_chunks", 10)))
+                    chunk_summaries = []
+                    for c in (chunks_for_outline or [])[:max_chunks]:
+                        s = summarize_chunk(c)
+                        if s:
+                            chunk_summaries.append(s)
+                    global_outline_arg = generate_global_outline(chunk_summaries) if chunk_summaries else ""
+                    use_rag_flag = True
+                    outline_elapsed = time.monotonic() - t_outline_start
+                    logger.info(
+                        "Global RAG activated",
+                        extra={"chunks": num_chunks, "threshold": min_chunks},
+                    )
+                    logger.info("run_generation: Global RAG enabled (chunks=%s); outline %.2fs", num_chunks, outline_elapsed)
+                except Exception as ex:
+                    logger.warning("run_generation: outline/rag prep failed, falling back to no RAG: %s", ex)
+                    use_rag_flag = False
+                    global_outline_arg = None
             else:
-                logger.info("run_generation: Global RAG skipped (chunks=%s <= threshold %s)", num_chunks, min_chunks)
+                if not use_global_rag:
+                    logger.info("run_generation: Global RAG skipped (disabled)")
+                else:
+                    logger.info("run_generation: Global RAG skipped (chunks=%s <= threshold %s)", num_chunks, min_chunks)
 
         # Dynamic timeout: base + 1 min per 10 chunks (so 100-page PDFs don't get marked stale)
         base_stale_sec = getattr(settings, "max_stale_generation_seconds", 1200)
@@ -344,12 +351,15 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         mcqs = _sort_medium_first(mcqs)[:target_n]
         logger.info("run_generation: dedupe/rank %.2fs (filtered to %s)", time.perf_counter() - t_dedupe_start, len(mcqs))
 
-        # One-shot top-up if short of target and within timeout
-        if len(mcqs) < target_n and (time.perf_counter() - run_start) < timeout_sec:
+        # Top-up when short of target (max 2 attempts) within timeout
+        max_top_up_attempts = 2
+        for top_up_attempt in range(max_top_up_attempts):
+            if len(mcqs) >= target_n or (time.perf_counter() - run_start) >= timeout_sec:
+                break
             top_up_needed = target_n - len(mcqs)
             try:
                 top_up_num = min(top_up_needed + 2, MAX_QUESTIONS)
-                logger.info("run_generation: partial (%s < %s), top-up run for %s more", len(mcqs), target_n, top_up_needed)
+                logger.info("run_generation: partial (%s < %s), top-up attempt %s for %s more", len(mcqs), target_n, top_up_attempt + 1, top_up_needed)
                 extra_mcqs, _e1, ei2, eo2, _ = generate_mcqs_with_rag(
                     extracted_text,
                     topic_slugs=topic_slugs,
@@ -367,9 +377,9 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
                         continue
                     mcqs.append(m)
                 mcqs = _sort_medium_first(mcqs)[:target_n]
-                logger.info("run_generation: after top-up mcqs=%s", len(mcqs))
+                logger.info("run_generation: after top-up attempt %s mcqs=%s", top_up_attempt + 1, len(mcqs))
             except Exception as top_ex:
-                logger.warning("run_generation: top-up failed: %s", top_ex)
+                logger.warning("run_generation: top-up attempt %s failed: %s", top_up_attempt + 1, top_ex)
 
         if not mcqs:
             _mark_failed(db, test, "No valid MCQs after filtering (text pipeline).")
@@ -406,6 +416,10 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             test.status = "completed" if len(mcqs) >= target_n else "partial"
             test.failure_reason = None
         test.questions_generated = len(mcqs)
+        if len(mcqs) < target_n:
+            test.partial_reason = f"We could only create {len(mcqs)} high-quality questions from this document due to limited material or generation limits."
+        else:
+            test.partial_reason = None
         test.processed_candidates = PARALLEL_CANDIDATES
         test.estimated_input_tokens = total_inp
         test.estimated_output_tokens = total_out

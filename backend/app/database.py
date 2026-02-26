@@ -43,6 +43,8 @@ def init_sqlite_db():
                 db.execute(text("ALTER TABLE generated_tests ADD COLUMN questions_generated INTEGER NOT NULL DEFAULT 0"))
             if rows and not any(r[1] == "processed_candidates" for r in rows):
                 db.execute(text("ALTER TABLE generated_tests ADD COLUMN processed_candidates INTEGER NOT NULL DEFAULT 0"))
+            if rows and not any(r[1] == "partial_reason" for r in rows):
+                db.execute(text("ALTER TABLE generated_tests ADD COLUMN partial_reason VARCHAR(512)"))
             db.commit()
         except Exception as e:
             logger.warning("SQLite init: generated_tests column add failed: %s", e)

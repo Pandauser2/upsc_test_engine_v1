@@ -35,6 +35,7 @@ class GeneratedTest(Base):
     estimated_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)  # set when status=failed
+    partial_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)  # set when status=partial, questions_generated < target_n
     target_questions: Mapped[int] = mapped_column(Integer, nullable=False, default=15)  # 1-20, from request
     questions_generated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # count persisted (0 until complete)
     processed_candidates: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 0..candidate_count during generation; "X of N candidates processed"

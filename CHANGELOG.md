@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- **B2B MVP frontend** — Next.js 14 app router, Tailwind, shadcn-style UI (Button, Input, Select, Card, Progress). Login (JWT in localStorage), PDF upload with extraction progress ("Extracting pages X/Y"), num_questions 1–8 + difficulty, Generate MCQs → redirect to test page, progress polling every 5s ("Generating questions Y/8"), results with editable question/explanation (PATCH on blur), `partial_reason` and error display, Download .docx. `frontend/src/app/page.tsx`, `app/tests/[id]/page.tsx`, `components/UploadForm.tsx`, `lib/api.ts`.
+- **REST generateContent with thinkingBudget=0** — MCQ generation calls Gemini v1beta REST with `generationConfig.thinkingConfig.thinkingBudget: 0` to avoid thought tokens. On 400, fallback to SDK path so generation always succeeds.
 - **Gemini-only LLM** — MCQ generation and summarization use Google Gemini (`google-genai`). Config: `GEN_MODEL_NAME` (default `gemini-2.0-flash`), `GEMINI_API_KEY`. See `backend/docs/GEMINI_MIGRATION_STEP1.md`.
 - **503 when GEMINI_API_KEY missing** — `POST /tests/generate` returns 503 (detail: set key in backend/.env) instead of enqueueing and returning mock MCQs.
 - **Extraction progress** — `Document.total_pages` and `Document.extracted_pages` set during PDF extraction. GET `/documents/{id}` returns them; frontend can show "Extracting pages X/Y". Progress callback in `extract_hybrid`; `run_extraction` updates DB (throttled every 5 pages).
@@ -25,6 +27,8 @@
 - **Chunking config** — `chunk_mode` (semantic | fixed), `chunk_size`, `chunk_overlap_fraction` in config; semantic uses spaCy + 20% overlap per EXPLORATION.
 
 ### Changed
+- **Max questions per generation 8** — `num_questions` capped at 8 in schema (`MAX_QUESTIONS_PER_GENERATION`), API, and job (`MAX_QUESTIONS`). Validation message: "Maximum 8 questions per generation to ensure quality and speed". POST with `num_questions=9` returns 422.
+- **partial_reason text** — When generation returns fewer than target, message now: "We could only create {n} high-quality questions from this document due to limited material or generation limits."
 - **Default Gemini model** — `GEN_MODEL_NAME` default changed from `gemini-1.5-flash-002` to `gemini-2.0-flash` (gemini-1.5-flash-002 returns 404 with current API). Set `GEN_MODEL_NAME` in .env to override.
 - **Gemini SDK: google.genai** — Replaced deprecated `google-generativeai` with `google-genai`. All Gemini usage (MCQ generation, validation, summarization, vision pipeline) now uses `from google import genai` and `client.models.generate_content` / `client.chats.create`. Removes FutureWarning. Requirements: `google-genai>=1.0.0` (drop `google-generativeai`).
 - **Documentation** — `DOCUMENTATION.md`: Gemini-only backend, `GEN_MODEL_NAME`/`GEMINI_API_KEY`/`OCR_THRESHOLD`, documents progress (`total_pages`/`extracted_pages`), 4 parallel Gemini, link to `EXTRACTION_LATENCY_OPTIMIZATION.md`. `backend/README.md`: env (Gemini, `OCR_THRESHOLD`), extraction progress, Gemini parallelization.
@@ -50,6 +54,7 @@
 - **Vision from generation path** — `run_generation` no longer calls `generate_mcqs_vision`. Vision code remains in repo (`vision_mcq.py`, `pdf_to_images`) but is not used for generation.
 
 ### Fixed
+- **Gemini REST 400 (safetySettings)** — REST request no longer sends `safetySettings` in body (v1beta rejects it in `generation_config`). Rely on API defaults; 400 fallback to SDK preserved.
 - **OCR on all pages for native NCERT PDF** — Trigger was `has_images_list[i]` (true for every page with any image). Now OCR only when native text per page < `OCR_THRESHOLD`; removed image_heavy and has_images from trigger.
 - Export dir path when `exports_dir` is set from env as string (normalized to `Path` before use).
 - Clear stuck generating: loop variable in `clear_stuck_generating_tests` renamed from `id` to avoid shadowing builtin.

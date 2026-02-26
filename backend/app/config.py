@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     # If True and Gemini returns 0 MCQs (e.g. invalid JSON), retry once with Claude (requires ANTHROPIC_API_KEY).
     claude_fallback: bool = False
+    # Gemini MCQ generation: max output tokens (env GEMINI_MAX_OUTPUT_TOKENS). Default 4000 for fast path.
+    gemini_max_output_tokens: int = 4000
 
     @field_validator("gen_model_name", mode="before")
     @classmethod
@@ -106,6 +108,8 @@ class Settings(BaseSettings):
     rag_outline_max_chunks: int = 10
     # Candidates to generate before validation filter; cap at 20 (MVP)
     mcq_candidate_count: int = 4
+    # Fast path: when extracted text length < this, skip chunking/RAG/parallel/validation and send full doc in one Gemini call. Env: MAX_SINGLE_CALL_CHARS.
+    max_single_call_chars: int = 600000
 
     # Celery (optional; use when concurrency or long jobs need a queue)
     celery_broker_url: str = "redis://localhost:6379/0"

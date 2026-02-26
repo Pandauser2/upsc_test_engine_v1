@@ -149,6 +149,41 @@ def generate_mcqs_with_rag(
     """
     t0 = time.perf_counter()
     target_n = target_n if target_n is not None else num_questions
+    text_stripped = (full_text or "").strip()
+    max_single = getattr(settings, "max_single_call_chars", 600000)
+
+    # Fast path: full document in one Gemini call when under size limit; skip chunking/RAG/outline/FAISS/parallel/validation
+    if text_stripped and len(text_stripped) < max_single:
+        from app.schemas.test import MAX_QUESTIONS_PER_GENERATION
+        _normalized_difficulty = (difficulty or "medium").strip().upper()
+        if _normalized_difficulty not in ("EASY", "MEDIUM", "HARD"):
+            _normalized_difficulty = "MEDIUM"
+        _normalized_difficulty = _normalized_difficulty.lower()
+        llm = get_llm_service()
+        request_n = min(target_n + 3, MAX_QUESTIONS_PER_GENERATION)
+        logger.info("generate_mcqs_with_rag: fast path single call (text_len=%s, request_n=%s)", len(text_stripped), request_n)
+        try:
+            mcqs, inp, out = llm.generate_mcqs(
+                text_stripped,
+                topic_slugs=topic_slugs,
+                num_questions=request_n,
+                difficulty=_normalized_difficulty,
+            )
+            if len(mcqs) < target_n:
+                logger.warning("generate_mcqs_with_rag: fast path under-generated: %s/%s", len(mcqs), target_n)
+            scores = [0.7] * len(mcqs)  # no validation on fast path
+            for i, m in enumerate(mcqs):
+                if isinstance(m, dict):
+                    m["validation_result"] = m.get("validation_result", "")
+                    m["quality_score"] = scores[i] if i < len(scores) else 0.7
+            elapsed = time.perf_counter() - t0
+            logger.info("generate_mcqs_with_rag: fast path total %.2fs mcqs=%s", elapsed, len(mcqs))
+            return mcqs, scores, inp, out, None
+        except Exception as e:
+            logger.warning("generate_mcqs_with_rag: fast path failed (%s), falling back to chunked path", e)
+            # fall through to chunked path
+
+    # Chunked path: chunking, FAISS, outline, parallel candidates, validation
     candidate_count = PARALLEL_CANDIDATES
     mode = getattr(settings, "chunk_mode", "semantic")
     t_chunk_start = time.perf_counter()
@@ -163,6 +198,7 @@ def generate_mcqs_with_rag(
         logger.warning("generate_mcqs_with_rag: no chunks produced")
         return [], [], 0, 0, None
 
+    logger.info("generate_mcqs_with_rag: chunked path (chunks=%s)", len(chunks))
     logger.info("generate_mcqs_with_rag: chunking %.2fs chunks=%s num_questions=%s target_n=%s candidates=%s", elapsed_chunk, len(chunks), num_questions, target_n, candidate_count)
     t_index = time.perf_counter()
     index, chunk_list = build_faiss_index(chunks) if use_rag else (None, chunks)
@@ -212,13 +248,17 @@ def generate_mcqs_with_rag(
 
     all_mcqs: list[dict] = []
     total_inp, total_out = 0, 0
+    failed_candidate_indices: list[int] = []
     t_parallel = time.perf_counter()
     with ThreadPoolExecutor(max_workers=candidate_count) as executor:
         futures = {executor.submit(_one_candidate, llm, i, groups[i]): i for i in range(candidate_count)}
         processed = 0
         for fut in as_completed(futures):
+            idx = futures[fut]
             try:
                 mcqs, inp, out = fut.result()
+                if not mcqs:
+                    failed_candidate_indices.append(idx)
                 total_inp += inp
                 total_out += out
                 all_mcqs.extend(mcqs)
@@ -234,6 +274,7 @@ def generate_mcqs_with_rag(
                     except Exception:
                         logger.debug("heartbeat_callback failed", exc_info=True)
             except Exception as e:
+                failed_candidate_indices.append(idx)
                 logger.warning("Parallel candidate future failed: %s", e)
                 processed += 1
                 if progress_callback:
@@ -241,6 +282,17 @@ def generate_mcqs_with_rag(
                         progress_callback(processed)
                     except Exception:
                         logger.debug("progress_callback failed after future error", exc_info=True)
+    # Retry failed candidates once (transient parse/API errors)
+    if failed_candidate_indices and len(all_mcqs) < target_n:
+        logger.info("generate_mcqs_with_rag: retrying %s failed candidates (indices %s)", len(failed_candidate_indices), failed_candidate_indices)
+        for idx in failed_candidate_indices:
+            try:
+                mcqs, inp, out = _one_candidate(llm, idx, groups[idx])
+                total_inp += inp
+                total_out += out
+                all_mcqs.extend(mcqs)
+            except Exception as e:
+                logger.warning("generate_mcqs_with_rag: retry candidate %s failed: %s", idx, e)
     elapsed_parallel = time.perf_counter() - t_parallel
     logger.info("generate_mcqs_with_rag: parallel block %.2fs (candidates=%s) mcqs=%s", elapsed_parallel, candidate_count, len(all_mcqs))
     if len(all_mcqs) == 0:
