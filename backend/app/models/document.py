@@ -29,6 +29,8 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="uploaded", index=True)
     extracted_text: Mapped[str] = mapped_column(Text, nullable=False)
     target_questions: Mapped[int | None] = mapped_column(Integer, nullable=True, default=15)  # 1-20, validated in API
+    total_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    progress_page: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

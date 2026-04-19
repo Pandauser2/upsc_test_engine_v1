@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24
 
-    # LLM: default provider is Claude (Anthropic). Set LLM_PROVIDER=openai to use OpenAI.
+    # LLM: default Claude. Set LLM_PROVIDER=openai or gemini for other providers.
     llm_provider: str = "claude"
     claude_api_key: str = ""
     claude_model: str = "claude-sonnet-4-20250514"
@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     openai_base_url: str = ""
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
 
     prompt_version: str = "mcq_v1"
     max_generation_time_seconds: int = 300
@@ -45,6 +47,10 @@ class Settings(BaseSettings):
     # File uploads (MVP: max 100 pages per PDF; reject larger at upload)
     upload_dir: Path = Path("./uploads")
     max_pdf_pages: int = 100
+    # Extraction runtime tuning
+    max_ocr_workers: int = 4
+    tesseract_confidence_threshold: float = 60.0
+    extraction_progress_update_every_pages: int = 5
 
     # Chunking: semantic (spaCy) or fixed
     chunk_mode: str = "semantic"
@@ -57,8 +63,13 @@ class Settings(BaseSettings):
     rag_min_chunks_for_global: int = 9
     rag_top_k: int = 5
     rag_embedding_model: str = "all-MiniLM-L6-v2"
+    # Optional local filesystem path to a pre-cached sentence-transformers model.
+    # When set, avoids runtime downloads from HuggingFace in restricted networks.
+    embedding_model_path: str = ""
     # Optional: filter retrieved chunks by L2 distance (keep if distance <= this). ~0.9 ≈ cosine > 0.6.
     rag_relevance_max_l2: float | None = None
+    max_context_chunks: int = 15
+    batch_validation_max: int = 20
     # Max chunks to summarize for global outline (caps outline latency).
     rag_outline_max_chunks: int = 10
     # Candidates to generate before validation filter; cap at 20 (MVP)
@@ -83,6 +94,8 @@ class Settings(BaseSettings):
         p = (self.llm_provider or "claude").strip().lower()
         if p == "openai":
             return self.openai_model
+        if p == "gemini":
+            return self.gemini_model
         return self.claude_model
 
 

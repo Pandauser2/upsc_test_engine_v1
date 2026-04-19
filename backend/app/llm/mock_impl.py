@@ -66,6 +66,13 @@ class MockLLMService:
         """Return (mock critique, 0, 0)."""
         return ("Approved (mock). Set CLAUDE_API_KEY for real validation.", 0, 0)
 
+    def validate_mcqs_batch(self, mcqs: list[dict]) -> tuple[list[dict], int, int]:
+        """Return mock batch validation in input order."""
+        out = []
+        for _ in mcqs:
+            out.append({"is_valid": True, "quality_score": 0.8, "critique": "Approved (mock)."})
+        return out, 0, 0
+
 
 def get_mock_llm_service() -> MockLLMService:
     return MockLLMService()

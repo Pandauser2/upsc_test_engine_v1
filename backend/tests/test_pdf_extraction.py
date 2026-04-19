@@ -29,16 +29,29 @@ def test_preprocess_strips_control_chars():
 
 @pytest.fixture
 def text_only_pdf(tmp_path):
-    """Create a minimal text-only PDF with PyMuPDF."""
+    """Create a text-only PDF: enough native text to avoid image-heavy OCR (>=5000) and valid extract (>=500)."""
     try:
         import pymupdf
     except ImportError:
         pytest.skip("pymupdf not installed")
     path = tmp_path / "text.pdf"
     doc = pymupdf.open()
+    seed = (
+        "UPSC Polity: Parliament, Judiciary, Executive; Fundamental Rights Part III; "
+        "DPSP Part IV; Amendment procedure Article 368; Federalism Union State relations. "
+    )
+    # PyMuPDF often extracts less than inserted length; overshoot so native sum clears 5000 (image-heavy gate)
+    blob = seed * 90
     page = doc.new_page()
-    page.insert_text((50, 50), "UPSC Polity: The Constitution of India is the supreme law.")
-    page.insert_text((50, 70), "Fundamental Rights are in Part III.")
+    y = 40
+    step = 220
+    for i in range(0, len(blob), step):
+        chunk = blob[i : i + step]
+        page.insert_text((40, y), chunk)
+        y += 14
+        if y > 780:
+            page = doc.new_page()
+            y = 40
     doc.save(path)
     doc.close()
     return str(path)
@@ -48,8 +61,8 @@ def test_extract_text_only_pdf(text_only_pdf):
     result = extract_hybrid(text_only_pdf, use_ocr_for_low_text=False)
     assert isinstance(result, ExtractionResult)
     assert result.is_valid is True
-    assert result.page_count == 1
-    assert "Constitution" in result.text or "Polity" in result.text
+    assert result.page_count >= 1
+    assert "Polity" in result.text or "Parliament" in result.text
     assert result.used_ocr_pages == []
 
 
@@ -85,12 +98,12 @@ def test_extract_low_text_uses_ocr_when_enabled(monkeypatch, tmp_path):
 
     ocr_calls = []
 
-    def fake_ocr(fp, pi):
-        ocr_calls.append((str(fp), pi))
+    def fake_ocr(_img, *, page_index, **kwargs):
+        ocr_calls.append(page_index)
         return "OCR text from image"
 
     from app.services import pdf_extraction_service as mod
-    monkeypatch.setattr(mod, "_ocr_page_pymupdf", fake_ocr)
+    monkeypatch.setattr(mod, "_ocr_image_with_confidence_fallback", fake_ocr)
 
     result = extract_hybrid(path, low_text_threshold=10, use_ocr_for_low_text=True)
     assert result.page_count == 1
@@ -99,7 +112,7 @@ def test_extract_low_text_uses_ocr_when_enabled(monkeypatch, tmp_path):
         assert "OCR text from image" in result.text
 
 
-def test_extract_mixed_multipage(tmp_path):
+def test_extract_mixed_multipage(monkeypatch, tmp_path):
     """Two pages: first with text, second with little text (OCR path for second)."""
     try:
         import pymupdf
@@ -108,7 +121,14 @@ def test_extract_mixed_multipage(tmp_path):
     path = tmp_path / "mixed.pdf"
     doc = pymupdf.open()
     p1 = doc.new_page()
-    p1.insert_text((50, 50), "Page one has enough text content for the threshold so we do not need OCR here.")
+    p1_long = (
+        "Page one has enough text content for the threshold so we do not need OCR here. "
+        * 80
+    )
+    y = 50
+    for i in range(0, len(p1_long), 100):
+        p1.insert_text((50, y), p1_long[i : i + 100])
+        y += 14
     p2 = doc.new_page()
     p2.insert_text((50, 50), "x")
     doc.save(path)
@@ -116,15 +136,87 @@ def test_extract_mixed_multipage(tmp_path):
 
     ocr_calls = []
 
-    def fake_ocr(fp, pi):
-        ocr_calls.append(pi)
-        return f"Page {pi + 1} OCR"
+    def fake_ocr(_img, *, page_index, **kwargs):
+        ocr_calls.append(page_index)
+        return f"Page {page_index + 1} OCR"
 
     from app.services import pdf_extraction_service as mod
-    monkeypatch.setattr(mod, "_ocr_page_pymupdf", fake_ocr)
+    monkeypatch.setattr(mod, "_ocr_image_with_confidence_fallback", fake_ocr)
 
     result = extract_hybrid(path, low_text_threshold=20, use_ocr_for_low_text=True)
     assert result.page_count == 2
     assert result.is_valid is True
     if len(ocr_calls) >= 1:
         assert 1 in result.used_ocr_pages or 0 in result.used_ocr_pages
+
+
+def test_extract_progress_callback_reaches_total(monkeypatch, tmp_path):
+    try:
+        import pymupdf
+    except ImportError:
+        pytest.skip("pymupdf not installed")
+
+    path = tmp_path / "progress.pdf"
+    doc = pymupdf.open()
+    for _ in range(3):
+        p = doc.new_page()
+        p.insert_text((50, 50), "x")
+    doc.save(path)
+    doc.close()
+
+    from app.services import pdf_extraction_service as mod
+
+    monkeypatch.setattr(
+        mod,
+        "_ocr_image_with_confidence_fallback",
+        lambda _img, *, page_index, **kwargs: f"OCR {page_index}",
+    )
+
+    progress = []
+
+    def on_progress(done: int, total: int):
+        progress.append((done, total))
+
+    result = extract_hybrid(path, progress_callback=on_progress)
+    assert result.page_count == 3
+    assert progress
+    assert progress[-1] == (3, 3)
+
+
+def test_per_page_failure_is_isolated(monkeypatch, tmp_path):
+    try:
+        import pymupdf
+    except ImportError:
+        pytest.skip("pymupdf not installed")
+
+    path = tmp_path / "partial_fail.pdf"
+    doc = pymupdf.open()
+    p1 = doc.new_page()
+    # Ensure enough text on page 1 so MIN_VALID_TEXT_LEN can still pass if page 2 fails.
+    y = 50
+    for idx in range(28):
+        p1.insert_text(
+            (50, y),
+            f"UPSC science line {idx}: environment polity economy geography biodiversity climate energy.",
+        )
+        y += 18
+    p2 = doc.new_page()
+    p2.insert_text((50, 50), "Page 2 will fail in native extraction path")
+    doc.save(path)
+    doc.close()
+
+    from app.services import pdf_extraction_service as mod
+
+    orig = mod._extract_page_blocks_from_page
+
+    def flaky(page, pymupdf_module):
+        if getattr(page, "number", -1) == 1:
+            raise RuntimeError("synthetic per-page failure")
+        return orig(page, pymupdf_module)
+
+    monkeypatch.setattr(mod, "_extract_page_blocks_from_page", flaky)
+
+    result = extract_hybrid(path, use_ocr_for_low_text=False)
+    assert result.page_count == 2
+    assert 1 in result.failed_pages
+    assert result.is_valid is True

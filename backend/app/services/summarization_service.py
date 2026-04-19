@@ -1,8 +1,9 @@
 """
 Summarization service: generate chunk summaries and global outline using LLM.
-Uses configured LLM provider (Claude/OpenAI) for summarization calls.
+Uses configured LLM provider (Claude/OpenAI/Gemini) for summarization calls.
 """
 import logging
+import os
 from typing import Callable
 
 from app.config import settings
@@ -25,6 +26,40 @@ def _call_llm_summarize(text: str, instruction: str) -> str:
         return _summarize_with_llm(f"{instruction}\n\n{text}")
 
     provider = (settings.llm_provider or "claude").strip().lower()
+    if provider == "gemini":
+        gkey = (
+            (settings.gemini_api_key or "").strip()
+            or (os.environ.get("GEMINI_API_KEY") or "").strip()
+            or (os.environ.get("GOOGLE_API_KEY") or "").strip()
+        )
+        if gkey:
+            try:
+                import google.generativeai as genai
+                from google.generativeai.types import HarmBlockThreshold, HarmCategory
+
+                genai.configure(api_key=gkey)
+                safety = [
+                    {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": HarmBlockThreshold.BLOCK_NONE},
+                    {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH, "threshold": HarmBlockThreshold.BLOCK_NONE},
+                    {"category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, "threshold": HarmBlockThreshold.BLOCK_NONE},
+                    {"category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, "threshold": HarmBlockThreshold.BLOCK_NONE},
+                ]
+                model = genai.GenerativeModel(
+                    (settings.gemini_model or "gemini-2.5-flash").strip(),
+                    system_instruction="You summarize text concisely. Output only the summary, no preamble.",
+                    safety_settings=safety,
+                )
+                r = model.generate_content(f"{instruction}\n\n{text[:50000]}")
+                try:
+                    out_text = (r.text or "").strip()
+                except ValueError:
+                    out_text = ""
+                if out_text:
+                    return out_text
+            except Exception as e:
+                logger.warning("Gemini summarization failed: %s", e)
+        return ""
+
     if provider == "openai" and (settings.openai_api_key or "").strip():
         try:
             from openai import OpenAI

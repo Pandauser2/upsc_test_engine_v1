@@ -29,10 +29,6 @@ def _get_candidate_count() -> int:
 # Max 3 concurrent generation jobs
 _generation_semaphore = threading.BoundedSemaphore(3)
 
-# Drop MCQs whose critique contains these (case-insensitive). Use specific phrases so we don't drop when critique only says "option B is incorrect" (distractor).
-BAD_CRITIQUE_SUBSTRINGS = ("incorrect key", "wrong answer", "incorrect answer", "key is wrong", "explanation is wrong")
-
-
 def _options_list_to_dict(opts: list) -> dict:
     """Convert list [{"label":"A","text":"..."}] to {"A":"..."} for LLM validate_mcq."""
     if not isinstance(opts, list):
@@ -45,14 +41,6 @@ def _options_to_dict(opts) -> dict:
     if isinstance(opts, dict):
         return {str(k).strip().upper(): str(v) for k, v in opts.items() if str(k).strip().upper() in "ABCDE"}
     return _options_list_to_dict(opts)
-
-
-def _sort_medium_first(mcqs: list[dict]) -> list[dict]:
-    """Simple sort: medium difficulty first, then easy, then hard."""
-    def key(m: dict) -> int:
-        d = (m.get("difficulty") or "medium").strip().lower()
-        return 0 if d == "medium" else (1 if d == "easy" else 2)
-    return sorted(mcqs, key=key)
 
 
 def _resolve_pdf_path(doc: Document) -> str | None:
@@ -92,8 +80,29 @@ def run_extraction(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
             logger.warning("run_extraction: PDF file not found for doc %s", doc_id)
             return
         from app.services.pdf_extraction_service import extract_hybrid
-        result = extract_hybrid(pdf_path)
+
+        def _progress(done_pages: int, total_pages: int) -> None:
+            every = max(1, int(getattr(settings, "extraction_progress_update_every_pages", 5)))
+            # Update every N pages (and final) to avoid excessive DB writes.
+            if done_pages < total_pages and done_pages % every != 0:
+                return
+            d = db.query(Document).filter(Document.id == doc_id).first()
+            if not d:
+                return
+            d.total_pages = total_pages
+            d.progress_page = done_pages
+            db.commit()
+
+        result = extract_hybrid(pdf_path, progress_callback=_progress, doc_id=str(doc_id))
         doc.extracted_text = result.text or ""
+        doc.total_pages = result.page_count
+        doc.progress_page = result.page_count
+        if getattr(result, "failed_pages", None):
+            logger.info(
+                "doc %s: %s pages failed, continuing",
+                doc_id,
+                len(result.failed_pages),
+            )
         doc.status = "ready" if (result.is_valid and (result.text or "").strip()) else "extraction_failed"
         db.commit()
         logger.info("run_extraction: doc %s status=%s text_len=%s", doc_id, doc.status, len(doc.extracted_text))
@@ -105,6 +114,8 @@ def run_extraction(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
                 if doc:
                     doc.status = "extraction_failed"
                     doc.extracted_text = ""
+                    if getattr(doc, "progress_page", None) is None:
+                        doc.progress_page = 0
                     db.commit()
             except Exception:
                 pass
@@ -251,7 +262,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             finally:
                 _db.close()
 
-        from app.services.mcq_generation_service import generate_mcqs_with_rag
+        from app.services.mcq_generation_service import generate_mcqs_with_rag, select_mcqs_for_persistence
         t_gen_start = time.monotonic()
         all_mcqs, _scores, total_inp, total_out, _ = generate_mcqs_with_rag(
             extracted_text,
@@ -266,17 +277,33 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         gen_elapsed = time.monotonic() - t_gen_start
         logger.info("run_generation: generate_mcqs_with_rag %.2fs (use_rag=%s)", gen_elapsed, use_rag_flag)
 
-        # Drop any with bad critique (already have validation_result from generate_mcqs_with_rag)
-        mcqs = []
-        for m in all_mcqs:
-            critique = (m.get("validation_result") or "").lower()
-            if any(bad in critique for bad in BAD_CRITIQUE_SUBSTRINGS):
-                continue
-            mcqs.append(m)
-        mcqs = _sort_medium_first(mcqs)[:target_n]
+        mcqs, selection_mode = select_mcqs_for_persistence(all_mcqs, target_n)
+        meta = test.generation_metadata if isinstance(test.generation_metadata, dict) else {}
+        meta = dict(meta)
+        meta["mcq_selection_mode"] = selection_mode
+        test.generation_metadata = meta
+        db.commit()
 
         if not mcqs:
-            _mark_failed(db, test, "No valid MCQs after filtering (text pipeline).")
+            if all_mcqs:
+                sample = (all_mcqs[0].get("validation_result") or "")[:200]
+                logger.warning(
+                    "run_generation: select_mcqs_for_persistence returned empty (raw=%s); first validation snippet=%r",
+                    len(all_mcqs),
+                    sample,
+                )
+                _mark_failed(
+                    db,
+                    test,
+                    "No usable MCQs after generation (all items failed shape check or critique gate; check logs).",
+                )
+            else:
+                logger.warning("run_generation: generate_mcqs_with_rag returned 0 MCQs")
+                _mark_failed(
+                    db,
+                    test,
+                    "No MCQs produced from the document (generation returned empty; check logs and API/model).",
+                )
             return
 
         persist_difficulty = requested_difficulty.lower()[:20]

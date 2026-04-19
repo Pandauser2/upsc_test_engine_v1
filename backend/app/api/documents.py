@@ -118,6 +118,8 @@ def upload_pdf(
             status="rejected",
             extracted_text="",
             target_questions=target_q,
+            total_pages=page_count,
+            progress_page=0,
         )
         db.add(doc)
         db.commit()
@@ -147,6 +149,8 @@ def upload_pdf(
         status="processing",
         extracted_text="",
         target_questions=target_q,
+        total_pages=page_count,
+        progress_page=0,
     )
     db.add(doc)
     db.commit()
@@ -225,6 +229,8 @@ def get_document_extract(
         used_ocr_pages=used_ocr_pages if used_ocr_pages else None,
         extraction_valid=extraction_valid,
         extraction_error=extraction_error,
+        total_pages=getattr(doc, "total_pages", None),
+        progress_page=getattr(doc, "progress_page", None),
     )
 
 
@@ -244,4 +250,6 @@ def get_document(
     return DocumentDetailResponse(
         **_doc_to_response(doc).model_dump(),
         extracted_text=doc.extracted_text,
+        total_pages=getattr(doc, "total_pages", None),
+        progress_page=getattr(doc, "progress_page", None),
     )

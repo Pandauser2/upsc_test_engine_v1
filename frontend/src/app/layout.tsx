@@ -1,3 +1,5 @@
+import "./globals.css";
+
 /**
  * Root layout. Minimal for Step 1; auth and dashboard added in Step 10.
  */

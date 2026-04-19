@@ -27,6 +27,8 @@ class DocumentListResponse(BaseModel):
 class DocumentDetailResponse(DocumentResponse):
     """Single document get; can include extracted_text."""
     extracted_text: str | None = None
+    total_pages: int | None = None
+    progress_page: int | None = None
 
 
 class DocumentExtractResponse(BaseModel):
@@ -42,3 +44,5 @@ class DocumentExtractResponse(BaseModel):
     used_ocr_pages: list[int] | None = None  # PDF only, 0-based page indices where OCR was used
     extraction_valid: bool | None = None  # PDF only, when extraction run on demand
     extraction_error: str | None = None  # PDF only, when extraction run on demand and failed
+    total_pages: int | None = None
+    progress_page: int | None = None

@@ -37,3 +37,11 @@ class LLMService(Protocol):
     def validate_mcq(self, mcq: dict) -> tuple[str, int, int]:
         """Return (critique, input_tokens, output_tokens). Critique stored in validation_result."""
         ...
+
+    def validate_mcqs_batch(self, mcqs: list[dict]) -> tuple[list[dict], int, int]:
+        """
+        Batch-validate MCQs in one call.
+        Returns (results, input_tokens, output_tokens) where each result has:
+        is_valid (bool), quality_score (0..1), critique (str).
+        """
+        ...

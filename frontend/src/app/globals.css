@@ -1,0 +1,219 @@
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1a1d26;
+  --muted: #5c6473;
+  --border: #e2e5ec;
+  --accent: #1e5a96;
+  --accent-hover: #164a7d;
+  --danger: #b42318;
+  --ok: #0d6b3a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1 {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin: 0 0 0.35rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 2rem 0 0.75rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.sub {
+  color: var(--muted);
+  font-size: 0.95rem;
+  margin: 0 0 1.5rem;
+}
+
+p.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.35rem 0 0;
+  max-width: 42rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.15rem;
+  margin-bottom: 1rem;
+}
+
+label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin: 0.65rem 0 0.25rem;
+}
+
+input[type="email"],
+input[type="password"],
+input[type="number"],
+select {
+  width: 100%;
+  max-width: 360px;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+input[type="file"] {
+  font-size: 0.9rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+button {
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button.secondary {
+  background: #fff;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.err {
+  color: var(--danger);
+  font-size: 0.9rem;
+  margin: 0.5rem 0 0;
+}
+
+.ok {
+  color: var(--ok);
+  font-size: 0.9rem;
+  margin: 0.5rem 0 0;
+}
+
+pre.meta {
+  font-size: 0.8rem;
+  background: var(--bg);
+  padding: 0.65rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.5rem 0 0;
+}
+
+.q {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.q h3 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.opts {
+  margin: 0.35rem 0;
+  padding-left: 1.1rem;
+}
+
+.opts li {
+  margin: 0.2rem 0;
+}
+
+.api-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 2rem;
+}
+
+.api-hint a {
+  color: var(--accent);
+}
+
+.extract-progress {
+  margin-top: 0.65rem;
+}
+
+.extract-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.extract-progress-icon {
+  font-size: 1rem;
+}
+
+.extract-progress-pct {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.extract-progress-track {
+  width: 100%;
+  height: 10px;
+  margin-top: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #eef2f6;
+  overflow: hidden;
+}
+
+.extract-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #7eb4e6 0%, #1e5a96 100%);
+  transition: width 250ms ease;
+}

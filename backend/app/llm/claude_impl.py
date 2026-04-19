@@ -171,6 +171,43 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
         out = getattr(response.usage, "output_tokens", 0) or 0
         return (critique, inp, out)
 
+    def validate_mcqs_batch(self, mcqs: list[dict]) -> tuple[list[dict], int, int]:
+        """Batch-validate MCQs and return aligned per-item results."""
+        user_content = (
+            "Validate each MCQ in this JSON array. For each, return a validation result with: "
+            "is_valid (bool), quality_score (0-1), critique (str). Return only a JSON array in the "
+            "same order as input.\n\n"
+            f"{json.dumps(mcqs, ensure_ascii=True)}"
+        )
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=2048,
+                system=MCQ_VALIDATE_SYSTEM,
+                messages=[{"role": "user", "content": user_content}],
+            )
+        except Exception as e:
+            logger.warning("Claude validate_mcqs_batch failed: %s", e)
+            raise
+
+        raw = ""
+        if response.content and len(response.content) > 0:
+            for block in response.content:
+                text = getattr(block, "text", None)
+                if text:
+                    raw += str(text)
+            raw = raw.strip()
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            if lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw = "\n".join(lines)
+        inp = getattr(response.usage, "input_tokens", 0) or 0
+        out = getattr(response.usage, "output_tokens", 0) or 0
+        return _parse_batch_validation_json(raw, len(mcqs)), inp, out
+
 
 def _parse_mcqs_json(raw: str, topic_slugs: list[str]) -> list[dict]:
     """Parse JSON and return list of MCQ dicts. Returns [] on parse error."""
@@ -215,4 +252,29 @@ def _parse_mcqs_json(raw: str, topic_slugs: list[str]) -> list[dict]:
             "difficulty": difficulty,
             "topic_tag": tag,
         })
+    return out
+
+
+def _parse_batch_validation_json(raw: str, expected_len: int) -> list[dict]:
+    """Parse batch validation output and normalize shape/order length."""
+    defaults = [{"is_valid": False, "quality_score": 0.5, "critique": ""} for _ in range(expected_len)]
+    if not raw or not raw.strip():
+        return defaults
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return defaults
+    if not isinstance(data, list):
+        return defaults
+    out: list[dict] = []
+    for i in range(expected_len):
+        item = data[i] if i < len(data) and isinstance(data[i], dict) else {}
+        is_valid = bool(item.get("is_valid", True))
+        try:
+            quality = float(item.get("quality_score", 0.5))
+        except (TypeError, ValueError):
+            quality = 0.5
+        quality = max(0.0, min(1.0, quality))
+        critique = str(item.get("critique", "") or "")
+        out.append({"is_valid": is_valid, "quality_score": quality, "critique": critique})
     return out

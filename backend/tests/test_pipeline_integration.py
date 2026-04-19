@@ -15,7 +15,9 @@ from app.services.mcq_generation_service import (
 def test_quality_score_from_critique():
     assert quality_score_from_critique("The correct answer is A.") == 1.0
     assert quality_score_from_critique("incorrect key") == 0.0
-    assert quality_score_from_critique("Wrong answer.") == 0.0
+    assert quality_score_from_critique("key is wrong") == 0.0
+    # "Wrong answer" alone is ambiguous (often means distractors); not scored as zero.
+    assert quality_score_from_critique("Wrong answer.") == 0.7
     assert quality_score_from_critique("") == 0.5
     assert quality_score_from_critique("Looks fine.") == 0.7
 

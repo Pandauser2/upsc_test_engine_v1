@@ -45,6 +45,10 @@ def init_sqlite_db():
             doc_rows = db.execute(text("PRAGMA table_info(documents)")).fetchall()
             if doc_rows and not any(r[1] == "target_questions" for r in doc_rows):
                 db.execute(text("ALTER TABLE documents ADD COLUMN target_questions INTEGER DEFAULT 15"))
+            if doc_rows and not any(r[1] == "total_pages" for r in doc_rows):
+                db.execute(text("ALTER TABLE documents ADD COLUMN total_pages INTEGER"))
+            if doc_rows and not any(r[1] == "progress_page" for r in doc_rows):
+                db.execute(text("ALTER TABLE documents ADD COLUMN progress_page INTEGER DEFAULT 0"))
             db.commit()
         except Exception:
             db.rollback()

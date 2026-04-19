@@ -70,17 +70,29 @@ Wait until it finishes. If you see any red error messages, read them; often they
 
 ## Step 6: Create a `.env` File (Optional but Recommended)
 
-The app can run without a `.env` file (it will use defaults and mock LLM). To set your own config (e.g. Claude API key):
+The app can run without a `.env` file (it will use defaults and mock LLM). To set your own config:
 
 1. In the same `backend` folder, create a file named exactly `.env` (with the dot at the start).
 2. Add one line per setting. For example:
 
 ```env
-CLAUDE_API_KEY=sk-ant-your-key-here
+# Choose provider: claude | openai | gemini
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your-google-ai-studio-key
+# Optional: GEMINI_MODEL=gemini-2.5-flash
 ```
 
-Replace `sk-ant-your-key-here` with your real API key from [console.anthropic.com](https://console.anthropic.com).  
-You can also set things like `DATABASE_URL`, `SECRET_KEY`, etc., if you need them later.
+Alternative keys:
+- Claude: `CLAUDE_API_KEY` from [console.anthropic.com](https://console.anthropic.com)
+- OpenAI: `OPENAI_API_KEY` from [platform.openai.com](https://platform.openai.com)
+
+If your environment cannot download embedding models from HuggingFace at runtime, cache locally and set:
+
+```env
+EMBEDDING_MODEL_PATH=./models/all-MiniLM-L6-v2
+```
+
+You can also set `DATABASE_URL`, `SECRET_KEY`, etc., if needed.
 
 Save the file in the `backend` folder (same folder as `requirements.txt`).
 
@@ -137,7 +149,7 @@ In the terminal where the server is running, press **Ctrl + C**. The server will
 - [ ] `python3 -m venv venv` (first time only)  
 - [ ] `source venv/bin/activate`  
 - [ ] `pip install -r requirements.txt`  
-- [ ] (Optional) Create `backend/.env` with `CLAUDE_API_KEY=...`  
+- [ ] (Optional) Create `backend/.env` with provider key (`GEMINI_API_KEY`, `CLAUDE_API_KEY`, or `OPENAI_API_KEY`)  
 - [ ] `./start_server.sh`  
 - [ ] Open http://localhost:8000 or http://localhost:8000/docs to test  
 

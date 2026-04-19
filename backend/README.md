@@ -21,12 +21,16 @@ FastAPI app (Python 3.11): auth, documents, topics, tests, MCQ generation job, .
 
 - `DATABASE_URL` — Postgres connection string.
 - `SECRET_KEY`, `JWT_ALGORITHM`, `JWT_EXPIRE_HOURS` — Auth.
-- `OPENAI_API_KEY`, `OPENAI_MODEL`, `PROMPT_VERSION`, `MAX_GENERATION_TIME_SECONDS` — LLM.
+- `LLM_PROVIDER` — `claude` | `openai` | `gemini`.
+- `CLAUDE_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` — provider key.
+- `CLAUDE_MODEL` / `OPENAI_MODEL` / `GEMINI_MODEL` — provider model.
+- `EMBEDDING_MODEL_PATH` — optional local path for sentence-transformers model (recommended in restricted networks).
+- `PROMPT_VERSION`, `MAX_GENERATION_TIME_SECONDS` — generation controls.
 - `UPLOAD_DIR` — Directory for uploaded PDFs (default `./uploads`).
 - `USE_GLOBAL_RAG` — Allow global RAG when doc has >RAG_MIN_CHUNKS_FOR_GLOBAL chunks (default false). See `RAG_GLOBAL_OUTLINE.md`.
 - `ENABLE_EXPORT` — If true, allows `export_result=true` on generate and writes MCQs to `exports/`. See `EXPORT_BASELINE.md`.
 
-Generation uses parallel single Claude calls (no Message Batches). Status from DB only; see `GENERATION_REFACTOR_STATUS.md`.
+Generation now uses RAG-first chunk selection, a single MCQ generation call, and batch validation with sequential fallback. Status from DB only; see `GENERATION_REFACTOR_STATUS.md`.
 
 ## API (all under `/`)
 

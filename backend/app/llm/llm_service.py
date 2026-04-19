@@ -26,6 +26,8 @@ def _is_retryable(exc: BaseException) -> bool:
     msg = str(exc).lower()
     if "429" in msg or "rate limit" in msg or "rate_limit" in msg:
         return True
+    if "resource exhausted" in msg or "quota" in msg:
+        return True
     if "500" in msg or "502" in msg or "503" in msg or "overloaded" in msg:
         return True
     return False
@@ -71,7 +73,12 @@ def get_llm_service_with_fallback():
     from app.llm.mock_impl import get_mock_llm_service
 
     primary = (settings.llm_provider or "claude").strip().lower()
-    secondary = "openai" if primary == "claude" else "claude"
+    if primary == "claude":
+        secondary = "openai"
+    elif primary == "gemini":
+        secondary = "claude"
+    else:
+        secondary = "claude"
 
     def _get_primary():
         return get_llm_service()
@@ -83,6 +90,9 @@ def get_llm_service_with_fallback():
                 return _get()
             except Exception:
                 return get_mock_llm_service()
+        if secondary == "gemini":
+            from app.llm.gemini_impl import get_llm_service as _get
+            return _get()
         from app.llm.claude_impl import get_llm_service as _get
         return _get()
 

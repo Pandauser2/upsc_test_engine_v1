@@ -5,6 +5,7 @@ Celery: optional; set CELERY_BROKER_URL (e.g. redis://localhost:6379/0) and run 
 Tenacity: LLM retries (429/5xx) are handled in app.llm.llm_service when using get_llm_service_with_fallback().
 """
 import logging
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,6 +50,18 @@ def startup():
             _log.info("Claude: API key loaded (len=%s). Real API will be used for MCQ generation.", len(key))
         else:
             _log.warning("Claude: No API key. Set CLAUDE_API_KEY in backend/.env for real generation (using mock).")
+    elif provider == "gemini":
+        key = (
+            (settings.gemini_api_key or "").strip()
+            or (os.environ.get("GEMINI_API_KEY") or "").strip()
+            or (os.environ.get("GOOGLE_API_KEY") or "").strip()
+        )
+        if key:
+            _log.info("Gemini: API key loaded (len=%s). Real API will be used for MCQ generation.", len(key))
+        else:
+            _log.warning(
+                "Gemini: No API key. Set GEMINI_API_KEY or GOOGLE_API_KEY in backend/.env (using mock)."
+            )
     else:
         key = (settings.openai_api_key or "").strip()
         if key:

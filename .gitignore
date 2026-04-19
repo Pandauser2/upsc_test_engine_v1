@@ -18,6 +18,10 @@ env/
 .env
 .env.local
 *.local
+.env.*
+backend/.env
+frontend/.env
+frontend/.env.*
 
 # IDE
 .idea/
@@ -31,12 +35,27 @@ env/
 htmlcov/
 backend/test_*.pdf
 backend/*.pdf
+*.log
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
 
 # Uploads (user PDFs)
 backend/uploads/*.pdf
 
 # Quality baseline exports (ENABLE_EXPORT)
 backend/exports/
+
+# Frontend build/deps
+frontend/node_modules/
+frontend/.next/
+frontend/.turbo/
+frontend/coverage/
+
+# Local embedding/model cache
+models/
 
 # OS
 .DS_Store
