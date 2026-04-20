@@ -41,7 +41,7 @@ OCR_MIN_LINE_LEN = 10
 # Post-OCR: drop lines with more than this fraction non-alphanumeric (incl. spaces)
 OCR_MAX_NONALNUM_RATIO = 0.80
 # OCR DPI for image-heavy (higher = better for small text)
-OCR_DPI_IMAGE_HEAVY = 350
+OCR_DPI_IMAGE_HEAVY = max(100, int(getattr(settings, "ocr_dpi_image_heavy", 350)))
 # Garbled heuristic: if > this fraction of non-ASCII chars are outside Devanagari range, run OCR
 GARBLED_RATIO_THRESHOLD = 0.30
 # Latin-1 supplement (U+0080–U+00FF) ratio: if > this, page is suspected mojibake → force OCR
@@ -61,7 +61,7 @@ LATIN1_SUPPLEMENT_START, LATIN1_SUPPLEMENT_END = 0x80, 0xFF
 # Minimum total cleaned text to consider extraction valid
 MIN_VALID_TEXT_LEN = 500
 # OCR render DPI for bilingual (higher = better for small script)
-OCR_DPI = 300
+OCR_DPI = max(100, int(getattr(settings, "ocr_dpi", 300)))
 # Debug sample length for before/after logging
 DEBUG_SAMPLE_LEN = 300
 # Regex for typical header mojibake chars (Indian gov PDFs): É º ¤ etc.

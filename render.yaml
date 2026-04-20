@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: upsc-test-engine-v1-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: upsc-test-engine-v1-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRE_HOURS
+        value: "24"
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: CORS_ORIGINS
+        sync: false
+      - key: MIN_EXTRACTION_WORDS
+        value: "500"
+      - key: MAX_PDF_PAGES
+        value: "100"
+      - key: MCQ_ESTIMATED_SECONDS_PER_QUESTION
+        value: "8"
+
+databases:
+  - name: upsc-test-engine-v1-db
+    databaseName: upsc_test_engine_v1
+    user: upsc_test_engine_v1_user
+    plan: free

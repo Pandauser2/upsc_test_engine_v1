@@ -70,7 +70,18 @@ def startup():
             _log.warning("OpenAI: No API key. Set OPENAI_API_KEY in backend/.env (using mock).")
     from app.database import init_sqlite_db
     init_sqlite_db()
-    from app.jobs.tasks import clear_stuck_generating_tests
+    from app.jobs.tasks import clear_stuck_generating_tests, clear_stuck_processing_documents
+    processing_stale_seconds = getattr(settings, "extraction_stale_processing_seconds", 1200)
+    try:
+        cleared_docs = clear_stuck_processing_documents(max_age_seconds=processing_stale_seconds)
+        if cleared_docs:
+            _log.warning(
+                "Startup: cleared %s stale processing document(s) older than %ss",
+                len(cleared_docs),
+                processing_stale_seconds,
+            )
+    except Exception as e:
+        _log.warning("Startup: could not clear stuck documents: %s", e)
     try:
         cleared = clear_stuck_generating_tests(max_age_seconds=getattr(settings, "max_stale_generation_seconds", 1200))
         if cleared:

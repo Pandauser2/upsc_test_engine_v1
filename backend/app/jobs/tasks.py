@@ -566,6 +566,40 @@ def cancel_generation(test_id: uuid.UUID, user_id: uuid.UUID) -> bool:
         db.close()
 
 
+def clear_stuck_processing_documents(max_age_seconds: int) -> list[tuple[uuid.UUID, str]]:
+    """
+    Mark documents stuck in processing longer than max_age_seconds as extraction_failed.
+    Uses COALESCE(updated_at, created_at) so rows that never advanced progress are still cleared.
+    """
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import text
+
+    db = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+        rows = db.execute(
+            text(
+                "SELECT id FROM documents "
+                "WHERE status = 'processing' AND COALESCE(updated_at, created_at) < :cutoff"
+            ),
+            {"cutoff": cutoff},
+        ).fetchall()
+        ids = [row[0] for row in rows]
+        if not ids:
+            return []
+        upd = text(
+            "UPDATE documents "
+            "SET status = 'extraction_failed', progress_page = COALESCE(progress_page, 0) "
+            "WHERE id = :id"
+        )
+        for doc_id in ids:
+            db.execute(upd, {"id": doc_id})
+        db.commit()
+        return [(doc_id, "extraction_failed") for doc_id in ids]
+    finally:
+        db.close()
+
+
 def clear_stuck_generating_tests(max_age_seconds: int) -> list[tuple[uuid.UUID, str]]:
     """Mark tests stuck in pending/generating longer than max_age_seconds as failed. Returns list of (test_id, status).
     Uses raw SQL so startup works even when failure_reason column does not exist yet (run alembic upgrade head)."""

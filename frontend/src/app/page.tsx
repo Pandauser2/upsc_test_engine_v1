@@ -65,7 +65,7 @@ function normalizeDocumentDetail(d: DocumentDetailResponse): {
   return { detail: { ...d, extracted_text: undefined }, wordCount };
 }
 
-export function extractionProgressPercent(doc: DocumentDetailResponse | null): number {
+function extractionProgressPercent(doc: DocumentDetailResponse | null): number {
   if (!doc) return 0;
   const status = (doc.status || "").toLowerCase();
   if (status === "ready" || status === "completed") return 100;
