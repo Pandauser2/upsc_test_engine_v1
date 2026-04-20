@@ -403,5 +403,106 @@ describe("generation progress UI", () => {
     expect(screen.getByText(/failure: Generation failed/i)).toBeInTheDocument();
     vi.useRealTimers();
   }, 15000);
+
+  test("generate button stays disabled while generation is in progress", async () => {
+    window.localStorage.setItem("upsc_test_engine_token", TOKEN);
+    apiMock.documentsList.mockResolvedValue({
+      items: [
+        {
+          id: DOC_ID,
+          user_id: "u1",
+          source_type: "pdf",
+          filename: "science.pdf",
+          title: "science.pdf",
+          status: "ready",
+          target_questions: 5,
+          created_at: "2026-04-19T00:00:00Z",
+        },
+      ],
+      total: 1,
+    });
+    apiMock.documentGet.mockResolvedValue(makeDocDetail({ status: "ready", total_pages: 20, progress_page: 20 }));
+    apiMock.testsGenerate.mockResolvedValue({
+      id: "test-6",
+      document_id: DOC_ID,
+      title: "science test",
+      status: "generating",
+      progress_mcq: 1,
+      total_mcq: 5,
+      progress_message: "1 of 5 questions created",
+    });
+    apiMock.testGet.mockResolvedValue({
+      id: "test-6",
+      document_id: DOC_ID,
+      title: "science test",
+      status: "generating",
+      progress_mcq: 1,
+      total_mcq: 5,
+      progress_message: "1 of 5 questions created",
+      questions: [],
+    });
+
+    render(<Home />);
+    const docButton = await screen.findByRole("button", { name: /science\.pdf/i });
+    fireEvent.click(docButton);
+    const generateButton = await screen.findByRole("button", { name: /generate test/i });
+    fireEvent.click(generateButton);
+
+    await screen.findByText(/already in progress/i);
+    expect(generateButton).toBeDisabled();
+  });
+
+  test("generate button re-enables after generation reaches terminal state", async () => {
+    window.localStorage.setItem("upsc_test_engine_token", TOKEN);
+    apiMock.documentsList.mockResolvedValue({
+      items: [
+        {
+          id: DOC_ID,
+          user_id: "u1",
+          source_type: "pdf",
+          filename: "science.pdf",
+          title: "science.pdf",
+          status: "ready",
+          target_questions: 5,
+          created_at: "2026-04-19T00:00:00Z",
+        },
+      ],
+      total: 1,
+    });
+    apiMock.documentGet.mockResolvedValue(makeDocDetail({ status: "ready", total_pages: 20, progress_page: 20 }));
+    apiMock.testsGenerate.mockResolvedValue({
+      id: "test-7",
+      document_id: DOC_ID,
+      title: "science test",
+      status: "generating",
+      progress_mcq: 0,
+      total_mcq: 5,
+      progress_message: "0 of 5 questions created",
+    });
+    apiMock.testGet.mockResolvedValue({
+      id: "test-7",
+      document_id: DOC_ID,
+      title: "science test",
+      status: "completed",
+      progress_mcq: 5,
+      total_mcq: 5,
+      progress_message: "5 of 5 questions created",
+      questions: [],
+    });
+
+    render(<Home />);
+    const docButton = await screen.findByRole("button", { name: /science\.pdf/i });
+    fireEvent.click(docButton);
+    const generateButton = await screen.findByRole("button", { name: /generate test/i });
+    fireEvent.click(generateButton);
+
+    vi.useFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    vi.useRealTimers();
+
+    expect(generateButton).not.toBeDisabled();
+  }, 15000);
 });
 

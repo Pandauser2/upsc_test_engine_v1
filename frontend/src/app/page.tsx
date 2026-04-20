@@ -141,6 +141,11 @@ export default function Home() {
     setError(null);
   };
 
+  const isGenerationInProgress = (() => {
+    const s = (testSummary?.status || "").toLowerCase();
+    return s === "pending" || s === "generating";
+  })();
+
   const withErr = async (fn: () => Promise<void>) => {
     clearFeedback();
     try {
@@ -369,6 +374,9 @@ export default function Home() {
     withErr(async () => {
       if (!token) throw new Error("Log in first.");
       if (!selectedDocId) throw new Error("Select a document (or upload one).");
+      if (isGenerationInProgress) {
+        throw new Error("A generation is already in progress. Please wait for it to finish.");
+      }
       setBusyGenerate(true);
       try {
         const latest = await documentGet(token, selectedDocId);
@@ -603,12 +611,17 @@ export default function Home() {
         <div className="row">
           <button
             type="button"
-            disabled={!token || !selectedDocId || docDetail?.status !== "ready" || busyGenerate}
+            disabled={!token || !selectedDocId || docDetail?.status !== "ready" || busyGenerate || isGenerationInProgress}
             onClick={handleGenerate}
           >
             {busyGenerate ? "Starting…" : "Generate test"}
           </button>
         </div>
+        {isGenerationInProgress && (
+          <p className="hint" style={{ marginTop: "0.75rem" }}>
+            Generation is already in progress for this test. Please wait until it completes.
+          </p>
+        )}
         {docDetail && docDetail.status !== "ready" && token && (
           <p className="err" style={{ marginTop: "0.75rem" }}>
             Generation is enabled only when the selected document is <strong>ready</strong> (needs extracted text and
