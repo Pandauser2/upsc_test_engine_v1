@@ -2,6 +2,7 @@
 Application configuration from environment variables.
 Loads .env from the backend directory so API keys are found regardless of cwd.
 """
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,13 +48,10 @@ class Settings(BaseSettings):
     # File uploads (MVP: max 100 pages per PDF; reject larger at upload)
     upload_dir: Path = Path("./uploads")
     max_pdf_pages: int = 100
-    # Extraction runtime tuning
-    max_ocr_workers: int = 4
-    ocr_dpi: int = 300
-    ocr_dpi_image_heavy: int = 350
-    tesseract_confidence_threshold: float = 60.0
     extraction_progress_update_every_pages: int = 5
     extraction_stale_processing_seconds: int = 1200
+    document_ai_processor_id: str = os.getenv("DOCUMENT_AI_PROCESSOR_ID", "")
+    google_application_credentials_json: str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON", "")
 
     # Chunking: semantic (spaCy) or fixed
     chunk_mode: str = "semantic"

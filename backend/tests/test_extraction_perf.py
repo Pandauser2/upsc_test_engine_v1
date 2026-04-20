@@ -32,17 +32,18 @@ def _make_low_text_pdf(path: Path, pages: int = 10) -> Path:
 
 def test_extract_hybrid_perf_smoke_10_pages(monkeypatch, tmp_path):
     """
-    Simulated scanned fixture: low-text pages trigger OCR, OCR function mocked for deterministic speed.
+    Simulated scanned fixture: Document AI response mocked for deterministic speed.
     Ensures pipeline produces valid text under a reasonable wall-clock budget.
     """
     pdf_path = _make_low_text_pdf(tmp_path / "scan10.pdf", pages=10)
 
     from app.services import pdf_extraction_service as mod
 
-    def fake_ocr(_img, *, page_index, **kwargs):
-        return f"page {page_index + 1} " + ("science polity economy history geography " * 20)
-
-    monkeypatch.setattr(mod, "_ocr_image_with_confidence_fallback", fake_ocr)
+    monkeypatch.setattr(
+        mod,
+        "process_pdf_bytes",
+        lambda _pdf_bytes: "science polity economy history geography " * 200,
+    )
 
     t0 = time.perf_counter()
     result = extract_hybrid(pdf_path)

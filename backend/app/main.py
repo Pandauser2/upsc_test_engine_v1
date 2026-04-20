@@ -137,8 +137,10 @@ def health():
 def debug_config():
     """Temporary runtime config visibility for production diagnostics."""
     return {
-        "max_ocr_workers": int(getattr(settings, "max_ocr_workers", 0)),
         "max_pdf_pages": int(getattr(settings, "max_pdf_pages", 0)),
-        "ocr_dpi": int(getattr(settings, "ocr_dpi", 0)),
-        "ocr_dpi_image_heavy": int(getattr(settings, "ocr_dpi_image_heavy", 0)),
+        "document_ai_processor_id_set": bool(getattr(settings, "document_ai_processor_id", "")),
+        "google_credentials_json_set": bool(
+            (os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
+            or (getattr(settings, "google_application_credentials_json", "") or "").strip()
+        ),
     }
