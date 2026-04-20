@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     rag_outline_max_chunks: int = 10
     # Candidates to generate before validation filter; cap at 20 (MVP)
     mcq_candidate_count: int = 4
+    mcq_estimated_seconds_per_question: int = 8
 
     # Celery (optional; use when concurrency or long jobs need a queue)
     celery_broker_url: str = "redis://localhost:6379/0"

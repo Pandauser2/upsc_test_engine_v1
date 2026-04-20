@@ -92,6 +92,14 @@ If your environment cannot download embedding models from HuggingFace at runtime
 EMBEDDING_MODEL_PATH=./models/all-MiniLM-L6-v2
 ```
 
+Optional generation progress pacing:
+
+```env
+MCQ_ESTIMATED_SECONDS_PER_QUESTION=8
+```
+
+This only affects the in-progress UI timer (`progress_mcq`), not final persisted question count.
+
 You can also set `DATABASE_URL`, `SECRET_KEY`, etc., if needed.
 
 Save the file in the `backend` folder (same folder as `requirements.txt`).

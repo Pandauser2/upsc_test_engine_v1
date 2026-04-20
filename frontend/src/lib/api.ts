@@ -135,6 +135,8 @@ export type TestResponse = {
   failure_reason?: string | null;
   questions_generated?: number | null;
   target_questions?: number | null;
+  progress_mcq?: number | null;
+  total_mcq?: number | null;
   progress?: number | null;
   progress_message?: string | null;
   stale?: boolean;
@@ -159,6 +161,8 @@ export type TestStatusResponse = {
   message: string;
   questions_generated: number;
   target_questions: number;
+  progress_mcq: number;
+  total_mcq: number;
 };
 
 export function testsGenerate(token: string, body: TestGenerateBody) {

@@ -80,6 +80,22 @@ export function extractionProgressPercent(doc: DocumentDetailResponse | null): n
   return 0;
 }
 
+function generationProgressPercent(test: TestResponse | null): number {
+  if (!test) return 0;
+  const status = (test.status || "").toLowerCase();
+  if (status === "completed") return 100;
+  if (status === "failed" || status === "failed_timeout") return 0;
+  const total = Number(test.total_mcq ?? 0);
+  const done = Number(test.progress_mcq ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  const ratio = Math.max(0, Math.min(1, done / total));
+  const pct = Math.round(ratio * 100);
+  if (status === "generating" || status === "pending" || status === "processing") {
+    return Math.min(95, pct);
+  }
+  return pct;
+}
+
 export default function Home() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -278,7 +294,7 @@ export default function Home() {
             );
           }
         }
-        await new Promise((r) => setTimeout(r, 2500));
+        await new Promise((r) => setTimeout(r, 2000));
         if (cancelled) return;
       }
     };
@@ -404,6 +420,13 @@ export default function Home() {
 
   const apiBase = getApiBase();
   const extractionProgress = extractionProgressPercent(docDetail);
+  const generationProgress = generationProgressPercent(testSummary);
+  const generationTotal = Number(testSummary?.total_mcq ?? 0);
+  const generationDone = Number(testSummary?.progress_mcq ?? 0);
+  const generationInProgress =
+    (testSummary?.status || "").toLowerCase() === "generating" ||
+    (testSummary?.status || "").toLowerCase() === "pending" ||
+    (testSummary?.status || "").toLowerCase() === "processing";
   const extractionIcon =
     docDetail?.status === "ready"
       ? "✅"
@@ -599,6 +622,46 @@ export default function Home() {
         {!testSummary && <p>No test run yet.</p>}
         {testSummary && (
           <>
+            <div className="extract-progress">
+              <div className="extract-progress-row">
+                <span className="extract-progress-icon" aria-hidden="true">
+                  {(testSummary.status || "").toLowerCase() === "completed"
+                    ? "✅"
+                    : (testSummary.status || "").toLowerCase() === "failed" ||
+                        (testSummary.status || "").toLowerCase() === "failed_timeout"
+                      ? "⚠️"
+                      : "⏳"}
+                </span>
+                <strong>Generation progress</strong>
+                <span className="extract-progress-pct">
+                  {generationTotal > 0 ? `${generationDone}/${generationTotal}` : "estimating..."}
+                </span>
+              </div>
+              <div
+                className="extract-progress-track"
+                role="progressbar"
+                aria-label="Generation progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={generationProgress}
+              >
+                <div className="extract-progress-fill" style={{ width: `${generationProgress}%` }} />
+              </div>
+              {generationTotal > 0 ? (
+                <p className="hint" style={{ marginTop: "0.35rem" }}>
+                  {generationProgress}% - {generationDone} of {generationTotal} questions created
+                </p>
+              ) : (
+                <p className="hint" style={{ marginTop: "0.35rem" }}>
+                  Progress will appear once total question count is available.
+                </p>
+              )}
+              {generationInProgress && generationTotal > 0 && (
+                <p className="hint" style={{ marginTop: "0.2rem" }}>
+                  Timer-based estimate is capped at 95% until completion.
+                </p>
+              )}
+            </div>
             <pre className="meta">
               test id: {testSummary.id}
               {"\n"}

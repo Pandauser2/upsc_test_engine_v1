@@ -106,6 +106,8 @@ class TestResponse(BaseModel):
     # Progress when status is pending/generating (batch or parallel)
     questions_generated: int | None = None
     target_questions: int | None = None
+    progress_mcq: int | None = None
+    total_mcq: int | None = None
     progress: float | None = None  # 0.0–1.0 when generating
     progress_message: str | None = None  # e.g. "3 of 10 questions created"
 
@@ -129,6 +131,8 @@ class TestStatusResponse(BaseModel):
     message: str
     questions_generated: int = 0
     target_questions: int = 0
+    progress_mcq: int = 0
+    total_mcq: int = 0
 
 
 class TestPatchRequest(BaseModel):

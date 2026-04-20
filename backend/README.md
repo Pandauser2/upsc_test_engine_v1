@@ -25,12 +25,13 @@ FastAPI app (Python 3.11): auth, documents, topics, tests, MCQ generation job, .
 - `CLAUDE_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` — provider key.
 - `CLAUDE_MODEL` / `OPENAI_MODEL` / `GEMINI_MODEL` — provider model.
 - `EMBEDDING_MODEL_PATH` — optional local path for sentence-transformers model (recommended in restricted networks).
+- `MCQ_ESTIMATED_SECONDS_PER_QUESTION` — fake-progress timer pacing for generation UI (default `8`).
 - `PROMPT_VERSION`, `MAX_GENERATION_TIME_SECONDS` — generation controls.
 - `UPLOAD_DIR` — Directory for uploaded PDFs (default `./uploads`).
 - `USE_GLOBAL_RAG` — Allow global RAG when doc has >RAG_MIN_CHUNKS_FOR_GLOBAL chunks (default false). See `RAG_GLOBAL_OUTLINE.md`.
 - `ENABLE_EXPORT` — If true, allows `export_result=true` on generate and writes MCQs to `exports/`. See `EXPORT_BASELINE.md`.
 
-Generation now uses RAG-first chunk selection, a single MCQ generation call, and batch validation with sequential fallback. Status from DB only; see `GENERATION_REFACTOR_STATUS.md`.
+Generation now uses RAG-first chunk selection, a single MCQ generation call, and batch validation with sequential fallback. While generation runs, backend updates `progress_mcq/total_mcq` for smoother UI progress and overwrites with real count after persistence.
 
 ## API (all under `/`)
 

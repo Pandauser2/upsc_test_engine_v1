@@ -1,6 +1,15 @@
 """Unit tests for RAG-first MCQ generation and batch validation behavior."""
+import time
+import uuid
 from unittest.mock import Mock
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.database import Base
+from app.jobs import tasks as task_mod
+from app.models.generated_test import GeneratedTest
+from app.models.user import User
 from app.services import mcq_generation_service as svc
 
 
@@ -114,3 +123,105 @@ def test_retry_guard_stops_after_max_retries(monkeypatch):
     )
     assert out == []
     assert llm.generate_mcqs.call_count <= 3
+
+
+def test_timer_stops_after_event_set(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_tick(_test_id):
+        calls["n"] += 1
+
+    monkeypatch.setattr(task_mod, "_tick_generation_progress", fake_tick)
+    stop_event, _thread = task_mod._start_generation_progress_timer(uuid.uuid4(), total_mcq=5, interval_seconds=0.05)
+
+    time.sleep(0.12)
+    before_stop = calls["n"]
+    stop_event.set()
+    time.sleep(0.12)
+
+    assert before_stop >= 1
+    assert calls["n"] == before_stop
+
+
+def test_timer_cap_never_reaches_total(monkeypatch):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    Base.metadata.create_all(bind=engine)
+
+    user_id = uuid.uuid4()
+    test_id = uuid.uuid4()
+    db = TestingSession()
+    try:
+        db.add(User(id=user_id, email="timercap@example.com", password_hash="x", role="faculty"))
+        db.add(
+            GeneratedTest(
+                id=test_id,
+                user_id=user_id,
+                document_id=uuid.uuid4(),
+                title="t",
+                status="generating",
+                prompt_version="mcq_v1",
+                model="mock",
+                target_questions=5,
+                progress_mcq=0,
+                total_mcq=5,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(task_mod, "SessionLocal", TestingSession)
+    for _ in range(20):
+        task_mod._tick_generation_progress(test_id)
+
+    db2 = TestingSession()
+    try:
+        row = db2.query(GeneratedTest).filter(GeneratedTest.id == test_id).first()
+        assert row is not None
+        assert row.progress_mcq == 4
+        assert row.progress_mcq < row.total_mcq
+    finally:
+        db2.close()
+
+
+def test_real_count_overwrites_timer_value(monkeypatch):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    TestingSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    Base.metadata.create_all(bind=engine)
+
+    user_id = uuid.uuid4()
+    test_id = uuid.uuid4()
+    db = TestingSession()
+    try:
+        db.add(User(id=user_id, email="timeroverwrite@example.com", password_hash="x", role="faculty"))
+        db.add(
+            GeneratedTest(
+                id=test_id,
+                user_id=user_id,
+                document_id=uuid.uuid4(),
+                title="t2",
+                status="generating",
+                prompt_version="mcq_v1",
+                model="mock",
+                target_questions=5,
+                progress_mcq=0,
+                total_mcq=5,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(task_mod, "SessionLocal", TestingSession)
+    task_mod._set_generation_progress(test_id, progress_mcq=3, total_mcq=5)
+    task_mod._set_generation_progress(test_id, progress_mcq=5, total_mcq=5)
+
+    db2 = TestingSession()
+    try:
+        row = db2.query(GeneratedTest).filter(GeneratedTest.id == test_id).first()
+        assert row is not None
+        assert row.progress_mcq == 5
+        assert row.total_mcq == 5
+    finally:
+        db2.close()

@@ -29,6 +29,74 @@ def _get_candidate_count() -> int:
 # Max 3 concurrent generation jobs
 _generation_semaphore = threading.BoundedSemaphore(3)
 
+
+def _set_generation_progress(test_id: uuid.UUID, progress_mcq: int | None = None, total_mcq: int | None = None) -> None:
+    """Write generation progress fields with a dedicated short-lived session."""
+    _db = SessionLocal()
+    try:
+        t = _db.query(GeneratedTest).filter(GeneratedTest.id == test_id).first()
+        if not t:
+            return
+        if progress_mcq is not None:
+            t.progress_mcq = max(0, int(progress_mcq))
+        if total_mcq is not None:
+            t.total_mcq = max(0, int(total_mcq))
+        _db.commit()
+    except Exception as ex:
+        _db.rollback()
+        logger.warning("set_generation_progress failed for test_id=%s: %s", test_id, ex)
+    finally:
+        _db.close()
+
+
+def _tick_generation_progress(test_id: uuid.UUID) -> None:
+    """
+    Increment fake progress by one tick while job is generating.
+    Capped at total_mcq - 1 so timer alone never reaches 100%.
+    """
+    from sqlalchemy import text
+
+    _db = SessionLocal()
+    try:
+        _db.execute(
+            text(
+                "UPDATE generated_tests "
+                "SET progress_mcq = CASE "
+                "  WHEN total_mcq <= 1 THEN 0 "
+                "  ELSE MIN(progress_mcq + 1, total_mcq - 1) "
+                "END "
+                "WHERE id = :id AND status = 'generating'"
+            ),
+            {"id": str(test_id)},
+        )
+        _db.commit()
+    except Exception as ex:
+        _db.rollback()
+        logger.warning("tick_generation_progress failed for test_id=%s: %s", test_id, ex)
+    finally:
+        _db.close()
+
+
+def _start_generation_progress_timer(
+    test_id: uuid.UUID, total_mcq: int, interval_seconds: float
+) -> tuple[threading.Event, threading.Thread | None]:
+    """Start daemon timer that ticks progress every interval while generating."""
+    stop_event = threading.Event()
+    total = max(0, int(total_mcq))
+    interval = max(0.05, float(interval_seconds))
+    if total <= 0:
+        return stop_event, None
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            if stop_event.wait(interval):
+                break
+            _tick_generation_progress(test_id)
+
+    th = threading.Thread(target=_loop, daemon=True, name=f"mcq-progress-{str(test_id)[:8]}")
+    th.start()
+    return stop_event, th
+
 def _options_list_to_dict(opts: list) -> dict:
     """Convert list [{"label":"A","text":"..."}] to {"A":"..."} for LLM validate_mcq."""
     if not isinstance(opts, list):
@@ -132,6 +200,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
     run_start = time.monotonic()
     logger.info("run_generation: start test_id=%s doc_id=%s user_id=%s", test_id, doc_id, user_id)
     sem_acquired = False
+    timer_stop: threading.Event | None = None
     db: Session | None = None
     try:
         db = SessionLocal()
@@ -202,6 +271,17 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         else:
             requested_difficulty = "MEDIUM"
         logger.info("run_generation: text pipeline test_id=%s candidate_count=%s target_n=%s num_questions=%s difficulty=%s", test_id, candidate_count, target_n, num_questions, requested_difficulty)
+
+        # Initialize fake progress (for UI perception) before blocking generation call.
+        test.total_mcq = target_n
+        test.progress_mcq = 0
+        db.commit()
+        estimated_per_q = max(1, int(getattr(settings, "mcq_estimated_seconds_per_question", 8)))
+        timer_stop, _timer_thread = _start_generation_progress_timer(
+            test_id=test_id,
+            total_mcq=target_n,
+            interval_seconds=float(estimated_per_q),
+        )
 
         from app.services.chunking_service import chunk_text
         mode = getattr(settings, "chunk_mode", "semantic")
@@ -285,6 +365,9 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         db.commit()
 
         if not mcqs:
+            if timer_stop is not None:
+                timer_stop.set()
+            _set_generation_progress(test_id, progress_mcq=0)
             if all_mcqs:
                 sample = (all_mcqs[0].get("validation_result") or "")[:200]
                 logger.warning(
@@ -330,18 +413,38 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
 
         elapsed = time.monotonic() - run_start
         if elapsed > timeout_sec:
-            test.status = "failed_timeout"
+            new_status = "failed_timeout"
+        else:
+            new_status = "completed" if len(mcqs) >= target_n else "partial"
+
+        # Atomic finalization for status/progress: write true count and leave 'generating'
+        # in one DB operation so timer ticks (guarded by status='generating') become no-ops.
+        from sqlalchemy import text
+        db.execute(
+            text(
+                "UPDATE generated_tests "
+                "SET progress_mcq = :count, status = :status "
+                "WHERE id = :id"
+            ),
+            {"count": int(len(mcqs)), "status": new_status, "id": str(test_id)},
+        )
+        db.commit()
+
+        # Stop timer only after status commit so late ticks cannot regress progress.
+        if timer_stop is not None:
+            timer_stop.set()
+
+        if new_status == "failed_timeout":
             test.failure_reason = f"Run exceeded {timeout_sec}s"
             logger.info("run_generation: Job timed out after %.0f seconds (chunks=%s, target=%s)", elapsed, num_chunks, target_n)
         else:
-            test.status = "completed" if len(mcqs) >= target_n else "partial"
             test.failure_reason = None
         test.questions_generated = len(mcqs)
         test.estimated_input_tokens = total_inp
         test.estimated_output_tokens = total_out
         test.estimated_cost_usd = None
         db.commit()
-        logger.info("run_generation: test %s %s with %s questions (elapsed %.1fs)", test_id, test.status, len(mcqs), elapsed)
+        logger.info("run_generation: test %s %s with %s questions (elapsed %.1fs)", test_id, new_status, len(mcqs), elapsed)
 
         # Optional: export MCQs to JSON for quality baseline (ENABLE_EXPORT=true and export_result=true)
         if getattr(settings, "enable_export", False) and isinstance(test.generation_metadata, dict) and test.generation_metadata.get("export_result"):
@@ -381,6 +484,9 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             except Exception as ex:
                 logger.warning("run_generation: export failed: %s", ex)
     except Exception as e:
+        if timer_stop is not None:
+            timer_stop.set()
+        _set_generation_progress(test_id, progress_mcq=0)
         logger.exception("run_generation failed for test_id=%s", test_id)
         # Mark test failed so it never stays "pending"; use existing db or new session if db failed early
         _db = db if db is not None else SessionLocal()
@@ -394,6 +500,8 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             if _db is not db:
                 _db.close()
     finally:
+        if timer_stop is not None:
+            timer_stop.set()
         if sem_acquired:
             try:
                 _generation_semaphore.release()
@@ -406,6 +514,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
 def _mark_failed(db: Session, test: GeneratedTest, reason: str) -> None:
     test.status = "failed"
     test.failure_reason = (reason[:512]) if reason else None
+    test.progress_mcq = 0
     db.commit()
     logger.warning("Test %s marked failed: %s", test.id, reason)
 
