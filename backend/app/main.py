@@ -131,3 +131,14 @@ def root():
 def health():
     """Health check (JSON)."""
     return {"status": "ok", "message": "UPSC Test Engine API"}
+
+
+@app.get("/debug/config")
+def debug_config():
+    """Temporary runtime config visibility for production diagnostics."""
+    return {
+        "max_ocr_workers": int(getattr(settings, "max_ocr_workers", 0)),
+        "max_pdf_pages": int(getattr(settings, "max_pdf_pages", 0)),
+        "ocr_dpi": int(getattr(settings, "ocr_dpi", 0)),
+        "ocr_dpi_image_heavy": int(getattr(settings, "ocr_dpi_image_heavy", 0)),
+    }
