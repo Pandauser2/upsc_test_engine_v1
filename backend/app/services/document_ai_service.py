@@ -9,7 +9,7 @@ import pymupdf
 from app.config import settings
 
 PROJECT_ID = "awesome-project-1-353706"
-LOCATION = "us-central1"
+LOCATION = os.getenv("DOCUMENT_AI_LOCATION", "us")
 SYNC_PROCESS_CHUNK_SIZE = 14
 
 
