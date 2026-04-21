@@ -136,6 +136,7 @@ Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff
                         max_output_tokens=8192,
                         temperature=0.35,
                     ),
+                    request_options={"timeout": 60},
                 )
 
             return _gen()
@@ -221,6 +222,7 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
                     response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=True).generate_content(
                         user_content,
                         generation_config=genai.GenerationConfig(max_output_tokens=512, temperature=0.2),
+                        request_options={"timeout": 60},
                     )
                     break
                 except Exception as e:
@@ -230,6 +232,7 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
                             response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=False).generate_content(
                                 user_content,
                                 generation_config=genai.GenerationConfig(max_output_tokens=512, temperature=0.2),
+                                request_options={"timeout": 60},
                             )
                             break
                         except Exception as e2:
@@ -275,6 +278,7 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
                 response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=True).generate_content(
                     user_content,
                     generation_config=genai.GenerationConfig(max_output_tokens=2048, temperature=0.2),
+                    request_options={"timeout": 60},
                 )
                 break
             except Exception as e:
@@ -284,6 +288,7 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
                         response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=False).generate_content(
                             user_content,
                             generation_config=genai.GenerationConfig(max_output_tokens=2048, temperature=0.2),
+                            request_options={"timeout": 60},
                         )
                         break
                     except Exception as e2:
