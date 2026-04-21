@@ -353,6 +353,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             global_outline=global_outline_arg,
             difficulty=requested_difficulty,
             heartbeat_callback=_heartbeat,
+            precomputed_chunks=chunks_for_outline,
         )
         gen_elapsed = time.monotonic() - t_gen_start
         logger.info("run_generation: generate_mcqs_with_rag %.2fs (use_rag=%s)", gen_elapsed, use_rag_flag)

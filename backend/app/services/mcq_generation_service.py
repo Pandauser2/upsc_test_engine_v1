@@ -367,6 +367,7 @@ def generate_mcqs_with_rag(
     difficulty: str | None = None,
     heartbeat_callback: Callable[[], None] | None = None,
     max_retries: int = 2,
+    precomputed_chunks: list[Any] | None = None,
 ) -> tuple[list[dict], list[float], int, int, str | None]:
     """
     Chunk text, retrieve relevant context chunks, generate once, then batch-validate.
@@ -375,13 +376,17 @@ def generate_mcqs_with_rag(
     """
     t0 = time.perf_counter()
     target_n = target_n if target_n is not None else num_questions
-    mode = getattr(settings, "chunk_mode", "semantic")
-    chunks = chunk_text(
-        full_text,
-        mode=mode,
-        chunk_size=getattr(settings, "chunk_size", 1500),
-        overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
-    )
+    if precomputed_chunks is not None:
+        chunks = precomputed_chunks
+        logger.info("generate_mcqs_with_rag: using precomputed chunks count=%s", len(chunks))
+    else:
+        mode = getattr(settings, "chunk_mode", "semantic")
+        chunks = chunk_text(
+            full_text,
+            mode=mode,
+            chunk_size=getattr(settings, "chunk_size", 1500),
+            overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
+        )
     if not chunks:
         logger.warning("generate_mcqs_with_rag: no chunks produced")
         return [], [], 0, 0, None
