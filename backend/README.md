@@ -38,4 +38,6 @@ Generation now uses RAG-first chunk selection, a single MCQ generation call, and
 - `POST /auth/register`, `POST /auth/login`, `GET /auth/me`
 - `POST /documents/upload`, `POST /documents`, `GET /documents`, `GET /documents/{id}`
 - `GET /topics`
-- `POST /tests/generate`, `GET /tests`, `GET /tests/{id}`, `PATCH /tests/{id}`, `PATCH /tests/{id}/questions/{qid}`, `POST /tests/{id}/questions`, `POST /tests/{id}/export`
+- `POST /tests/generate`, `GET /tests`, `GET /tests/{id}`, `PATCH /tests/{id}`, `PATCH /tests/
+
+{id}/questions/{qid}`, `POST /tests/{id}/questions`, `POST /tests/{id}/export`
