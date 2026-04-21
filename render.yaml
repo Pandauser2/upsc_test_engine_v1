@@ -35,6 +35,8 @@ services:
         value: "100"
       - key: MCQ_ESTIMATED_SECONDS_PER_QUESTION
         value: "8"
+      - key: EMBEDDING_MODEL_PATH
+        value: ""
 
 databases:
   - name: upsc-test-engine-v1-db

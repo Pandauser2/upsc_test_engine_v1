@@ -4,6 +4,7 @@ top-k retrieval support, single-pass generation, and batch validation with fallb
 """
 import logging
 import os
+import threading
 import time
 from typing import Any, Callable
 
@@ -35,16 +36,39 @@ LOW_QUALITY_PHRASES = CRITIQUE_DROP_SUBSTRINGS
 def _embedding_model():
     """Lazy-load sentence-transformers model."""
     if not hasattr(_embedding_model, "_model"):
+        model_path = (
+            (settings.embedding_model_path or "").strip()
+            or (os.environ.get("EMBEDDING_MODEL_PATH") or "").strip()
+        )
+        if not model_path:
+            logger.info("_embedding_model: no path configured, skipping load")
+            _embedding_model._model = None
+            return _embedding_model._model
+
+        result: dict[str, Any] = {"model": None, "error": None}
+
+        def _load() -> None:
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                result["model"] = SentenceTransformer(model_path)
+            except Exception as e:  # pragma: no cover - defensive, branch tested via behavior
+                result["error"] = e
+
+        t = threading.Thread(target=_load, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        if t.is_alive():
+            logger.warning("_embedding_model: load timed out or failed, using uniform sampling fallback")
+            _embedding_model._model = None
+            return _embedding_model._model
+        if result["error"] is not None:
+            logger.warning("sentence_transformers not available: %s", result["error"])
+            _embedding_model._model = None
+            return _embedding_model._model
+
         try:
-            from sentence_transformers import SentenceTransformer
-            model_path = (
-                (settings.embedding_model_path or "").strip()
-                or (os.environ.get("EMBEDDING_MODEL_PATH") or "").strip()
-                or getattr(settings, "rag_embedding_model", "all-MiniLM-L6-v2")
-            )
-            _embedding_model._model = SentenceTransformer(
-                model_path
-            )
+            _embedding_model._model = result["model"]
         except Exception as e:
             logger.warning("sentence_transformers not available: %s", e)
             _embedding_model._model = None
@@ -385,7 +409,12 @@ def generate_mcqs_with_rag(
     else:
         # Always use relevance retrieval for large docs to avoid all-chunk iteration for small target_n.
         # `use_rag` only controls upstream global-outline flow in tasks.py.
+        logger.info("generate_mcqs_with_rag: loading embedding model")
+        model = _embedding_model()
+        logger.info("generate_mcqs_with_rag: embedding model ready=%s", model is not None)
+        logger.info("generate_mcqs_with_rag: retrieving relevant chunks")
         relevant_chunks = retrieve_relevant_chunks(chunk_list, num_questions, topic_slugs)
+        logger.info("generate_mcqs_with_rag: retrieved %d chunks", len(relevant_chunks))
         logger.info(
             "generate_mcqs_with_rag: retrieval path chunks=%s selected=%s use_rag=%s",
             len(chunk_list),
@@ -398,12 +427,14 @@ def generate_mcqs_with_rag(
     for attempt in range(max_retries + 1):
         attempts_used = attempt + 1
         try:
+            logger.info("generate_mcqs_with_rag: calling LLM generate")
             mcqs, inp, out = llm.generate_mcqs(
                 combined_context,
                 topic_slugs=topic_slugs,
                 num_questions=num_questions,
                 difficulty=_normalized_difficulty,
             )
+            logger.info("generate_mcqs_with_rag: LLM returned %d candidates", len(mcqs))
         except Exception as e:
             logger.warning("LLM single-generation call failed (attempt=%s): %s", attempts_used, e)
             mcqs, inp, out = [], 0, 0
