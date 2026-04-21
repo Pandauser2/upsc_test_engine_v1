@@ -59,6 +59,18 @@ def _is_model_not_found(exc: BaseException) -> bool:
     return "404" in msg and ("model" in msg and ("not found" in msg or "no longer available" in msg))
 
 
+def _is_timeout_error(e: Exception) -> bool:
+    try:
+        import google.api_core.exceptions
+
+        if isinstance(e, google.api_core.exceptions.DeadlineExceeded):
+            return True
+    except ImportError:
+        pass
+    msg = str(e).lower()
+    return "timeout" in msg or "deadline exceeded" in msg or "timed out" in msg
+
+
 def get_llm_service():
     """Return Gemini service if API key is set; otherwise mock."""
     key = _get_api_key()
@@ -136,7 +148,7 @@ Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff
                         max_output_tokens=8192,
                         temperature=0.35,
                     ),
-                    request_options={"timeout": 60},
+                    request_options={"timeout": 30},
                 )
 
             return _gen()
@@ -157,6 +169,9 @@ Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff
                     response = _call_generate(model_name, with_safety=True)
                     break
                 except Exception as e:
+                    if _is_timeout_error(e):
+                        logger.error("Gemini timeout on model=%s, aborting fallback chain", model_name)
+                        raise
                     if _is_safety_settings_error(e):
                         logger.warning(
                             "Gemini safety settings rejected by SDK/API for model=%s; retrying without custom safety settings",
@@ -222,17 +237,20 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
                     response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=True).generate_content(
                         user_content,
                         generation_config=genai.GenerationConfig(max_output_tokens=512, temperature=0.2),
-                        request_options={"timeout": 60},
+                        request_options={"timeout": 30},
                     )
                     break
                 except Exception as e:
+                    if _is_timeout_error(e):
+                        logger.error("Gemini timeout on model=%s, aborting fallback chain", model_name)
+                        raise
                     if _is_safety_settings_error(e):
                         logger.warning("Gemini validate_mcq: safety settings rejected; retrying without custom safety settings")
                         try:
                             response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=False).generate_content(
                                 user_content,
                                 generation_config=genai.GenerationConfig(max_output_tokens=512, temperature=0.2),
-                                request_options={"timeout": 60},
+                                request_options={"timeout": 30},
                             )
                             break
                         except Exception as e2:
@@ -278,17 +296,20 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
                 response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=True).generate_content(
                     user_content,
                     generation_config=genai.GenerationConfig(max_output_tokens=2048, temperature=0.2),
-                    request_options={"timeout": 60},
+                    request_options={"timeout": 30},
                 )
                 break
             except Exception as e:
+                if _is_timeout_error(e):
+                    logger.error("Gemini timeout on model=%s, aborting fallback chain", model_name)
+                    raise
                 if _is_safety_settings_error(e):
                     logger.warning("Gemini validate_mcqs_batch: safety settings rejected; retrying without custom safety settings")
                     try:
                         response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=False).generate_content(
                             user_content,
                             generation_config=genai.GenerationConfig(max_output_tokens=2048, temperature=0.2),
-                            request_options={"timeout": 60},
+                            request_options={"timeout": 30},
                         )
                         break
                     except Exception as e2:
