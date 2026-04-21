@@ -142,6 +142,7 @@ Generate exactly {n} MCQs from the full material above. Set difficulty to "{diff
                 reraise=True,
             )
             def _gen():
+                logger.info("Gemini prompt size: %d chars", len(user_content))
                 return model.generate_content(
                     user_content,
                     generation_config=genai.GenerationConfig(
@@ -234,6 +235,7 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
             response = None
             for model_name in self._model_candidates:
                 try:
+                    logger.info("Gemini prompt size: %d chars", len(user_content))
                     response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=True).generate_content(
                         user_content,
                         generation_config=genai.GenerationConfig(max_output_tokens=512, temperature=0.2),
@@ -247,6 +249,7 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
                     if _is_safety_settings_error(e):
                         logger.warning("Gemini validate_mcq: safety settings rejected; retrying without custom safety settings")
                         try:
+                            logger.info("Gemini prompt size: %d chars", len(user_content))
                             response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=False).generate_content(
                                 user_content,
                                 generation_config=genai.GenerationConfig(max_output_tokens=512, temperature=0.2),
@@ -293,6 +296,7 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
         response = None
         for model_name in self._model_candidates:
             try:
+                logger.info("Gemini prompt size: %d chars", len(user_content))
                 response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=True).generate_content(
                     user_content,
                     generation_config=genai.GenerationConfig(max_output_tokens=2048, temperature=0.2),
@@ -306,6 +310,7 @@ Provide a short critique. If the correct key or explanation is wrong, say so (e.
                 if _is_safety_settings_error(e):
                     logger.warning("Gemini validate_mcqs_batch: safety settings rejected; retrying without custom safety settings")
                     try:
+                        logger.info("Gemini prompt size: %d chars", len(user_content))
                         response = self._model(model_name, MCQ_VALIDATE_SYSTEM, with_safety=False).generate_content(
                             user_content,
                             generation_config=genai.GenerationConfig(max_output_tokens=2048, temperature=0.2),
