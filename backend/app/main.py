@@ -144,3 +144,14 @@ def debug_config():
             or (getattr(settings, "google_application_credentials_json", "") or "").strip()
         ),
     }
+
+
+@app.get("/debug/gemini")
+async def debug_gemini():
+    import httpx
+
+    try:
+        r = httpx.get("https://generativelanguage.googleapis.com", timeout=10)
+        return {"status": r.status_code}
+    except Exception as e:
+        return {"error": str(e)}
