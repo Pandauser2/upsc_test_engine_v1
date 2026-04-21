@@ -63,7 +63,7 @@ def _tick_generation_progress(test_id: uuid.UUID) -> None:
                 "UPDATE generated_tests "
                 "SET progress_mcq = CASE "
                 "  WHEN total_mcq <= 1 THEN 0 "
-                "  ELSE MIN(progress_mcq + 1, total_mcq - 1) "
+                "  ELSE CASE WHEN progress_mcq + 1 < total_mcq - 1 THEN progress_mcq + 1 ELSE total_mcq - 1 END "
                 "END "
                 "WHERE id = :id AND status = 'generating'"
             ),
