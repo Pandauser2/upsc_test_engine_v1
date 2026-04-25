@@ -70,6 +70,7 @@ class ClaudeLLMService:
         topic_slugs: list[str],
         num_questions: int | None = None,
         difficulty: str | None = None,
+        style_profile: str | None = None,
     ) -> tuple[list[dict], int, int]:
         n = num_questions if num_questions is not None else 5
         n = max(1, min(25, n))
@@ -78,7 +79,17 @@ class ClaudeLLMService:
             diff = "medium"
         slugs_str = ", ".join(repr(s) for s in (topic_slugs or ["polity"]))
 
-        user_content = f"""Topic slugs (use one verbatim for each MCQ): {slugs_str}
+        style_block = ""
+        if (style_profile or "").strip():
+            style_block = f"""## REFERENCE STYLE GUIDE (from previous year question papers)
+{style_profile.strip()}
+
+Generate questions that closely mirror the above style, question formats, and trap patterns.
+---
+
+"""
+
+        user_content = f"""{style_block}Topic slugs (use one verbatim for each MCQ): {slugs_str}
 
 Difficulty level for this run: {diff}. Generate each MCQ with difficulty set to "{diff}" in the output.
 

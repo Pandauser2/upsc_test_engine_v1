@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -264,6 +265,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         num_questions = min(target_n + 2, MAX_QUESTIONS)  # small buffer for validation drop
         meta = test.generation_metadata if isinstance(test.generation_metadata, dict) else {}
         requested_difficulty = (meta.get("difficulty") or "MEDIUM")
+        reference_qp_hash = (meta.get("reference_qp_hash") or "").strip() if isinstance(meta.get("reference_qp_hash"), str) else ""
         if isinstance(requested_difficulty, str):
             requested_difficulty = requested_difficulty.strip().upper()
             if requested_difficulty not in ("EASY", "MEDIUM", "HARD"):
@@ -284,13 +286,28 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         )
 
         from app.services.chunking_service import chunk_text
+        from app.services.reference_qp_service import get_cached_style_profile
         mode = getattr(settings, "chunk_mode", "semantic")
-        chunks_for_outline = chunk_text(
-            extracted_text,
-            mode=mode,
-            chunk_size=getattr(settings, "chunk_size", 1500),
-            overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
-        )
+        style_profile: str | None = None
+        if reference_qp_hash:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                chunk_future = executor.submit(
+                    chunk_text,
+                    extracted_text,
+                    mode,
+                    getattr(settings, "chunk_size", 1500),
+                    getattr(settings, "chunk_overlap_fraction", 0.2),
+                )
+                style_future = executor.submit(get_cached_style_profile, reference_qp_hash)
+                chunks_for_outline = chunk_future.result()
+                style_profile = style_future.result()
+        else:
+            chunks_for_outline = chunk_text(
+                extracted_text,
+                mode=mode,
+                chunk_size=getattr(settings, "chunk_size", 1500),
+                overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
+            )
         num_chunks = len(chunks_for_outline or [])
         min_chunks = getattr(settings, "rag_min_chunks_for_global", 9)
         use_global_rag = getattr(settings, "use_global_rag", False)
@@ -354,6 +371,7 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             difficulty=requested_difficulty,
             heartbeat_callback=_heartbeat,
             precomputed_chunks=chunks_for_outline,
+            style_profile=style_profile,
         )
         gen_elapsed = time.monotonic() - t_gen_start
         logger.info("run_generation: generate_mcqs_with_rag %.2fs (use_rag=%s)", gen_elapsed, use_rag_flag)

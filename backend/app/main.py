@@ -16,6 +16,7 @@ from app.api.auth import router as auth_router
 from app.api.documents import router as documents_router
 from app.api.topics import router as topics_router
 from app.api.tests import router as tests_router
+from app.api.reference_qps import router as reference_qps_router
 
 app = FastAPI(
     title="UPSC Test Engine API",
@@ -36,6 +37,7 @@ app.include_router(auth_router)
 app.include_router(documents_router)
 app.include_router(topics_router)
 app.include_router(tests_router)
+app.include_router(reference_qps_router)
 
 
 @app.on_event("startup")

@@ -53,6 +53,7 @@ class MockLLMService:
         topic_slugs: list[str],
         num_questions: int | None = None,
         difficulty: str | None = None,
+        style_profile: str | None = None,
     ) -> tuple[list[dict], int, int]:
         """Return (placeholder MCQs, fake input tokens, fake output tokens)."""
         n = num_questions if num_questions is not None else DEFAULT_NUM_QUESTIONS

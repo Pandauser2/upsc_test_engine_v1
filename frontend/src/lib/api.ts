@@ -119,12 +119,25 @@ export function documentUpload(token: string, file: File, numQuestions?: number)
   return apiForm<DocumentResponse>("/documents/upload", fd, token);
 }
 
+export type ReferenceQpUploadResponse = {
+  qp_hash: string;
+  style_profile: string;
+  cached: boolean;
+};
+
+export function referenceQpUpload(token: string, file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return apiForm<ReferenceQpUploadResponse>("/reference-qps/upload", fd, token);
+}
+
 /** --- Tests --- */
 export type TestGenerateBody = {
   document_id: string;
   num_questions: number;
   difficulty: "EASY" | "MEDIUM" | "HARD";
   export_result?: boolean;
+  reference_qp_hash?: string | null;
 };
 
 export type TestResponse = {

@@ -10,6 +10,7 @@ import {
   documentUpload,
   documentsList,
   getApiBase,
+  referenceQpUpload,
   type DocumentDetailResponse,
   type DocumentResponse,
   type TestDetailResponse,
@@ -116,6 +117,8 @@ export default function Home() {
 
   const [genNumQ, setGenNumQ] = useState<number>(5);
   const [genDifficulty, setGenDifficulty] = useState<"EASY" | "MEDIUM" | "HARD">("MEDIUM");
+  const [referenceQpHash, setReferenceQpHash] = useState<string | null>(null);
+  const [referenceQpBusy, setReferenceQpBusy] = useState(false);
 
   const [testSummary, setTestSummary] = useState<TestResponse | null>(null);
   const [testDetail, setTestDetail] = useState<TestDetailResponse | null>(null);
@@ -396,6 +399,7 @@ export default function Home() {
           num_questions: genNumQ,
           difficulty: genDifficulty,
           export_result: false,
+          reference_qp_hash: referenceQpHash,
         });
         setTestSummary(t);
         setTestDetail(null);
@@ -404,6 +408,28 @@ export default function Home() {
         setBusyGenerate(false);
       }
     });
+
+  const handleReferenceQpSelect = async (selected: File | null) => {
+    if (!token) {
+      setError("Log in first.");
+      return;
+    }
+    if (!selected) {
+      setReferenceQpHash(null);
+      return;
+    }
+    setReferenceQpBusy(true);
+    try {
+      const resp = await referenceQpUpload(token, selected);
+      setReferenceQpHash(resp.qp_hash || null);
+      setMessage(resp.cached ? "Reference QP style loaded from cache." : "Reference QP style extracted.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setReferenceQpHash(null);
+    } finally {
+      setReferenceQpBusy(false);
+    }
+  };
 
   const handleSelectDoc = (id: string) => {
     setSelectedDocId(id);
@@ -608,6 +634,17 @@ export default function Home() {
           <option value="MEDIUM">MEDIUM</option>
           <option value="HARD">HARD</option>
         </select>
+        <label htmlFor="referenceQp">Optional: Upload Reference Question Paper (PDF)</label>
+        <input
+          id="referenceQp"
+          type="file"
+          accept="application/pdf,.pdf"
+          disabled={!token || referenceQpBusy}
+          onChange={(e) => void handleReferenceQpSelect(e.target.files?.[0] ?? null)}
+        />
+        <p className="hint">
+          Style: <strong>{referenceQpHash ? "PYQ-matched" : "Default"}</strong>
+        </p>
         <div className="row">
           <button
             type="button"

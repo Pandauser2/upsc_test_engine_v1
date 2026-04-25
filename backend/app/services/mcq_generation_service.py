@@ -368,6 +368,7 @@ def generate_mcqs_with_rag(
     heartbeat_callback: Callable[[], None] | None = None,
     max_retries: int = 2,
     precomputed_chunks: list[Any] | None = None,
+    style_profile: str | None = None,
 ) -> tuple[list[dict], list[float], int, int, str | None]:
     """
     Chunk text, retrieve relevant context chunks, generate once, then batch-validate.
@@ -438,6 +439,7 @@ def generate_mcqs_with_rag(
                 topic_slugs=topic_slugs,
                 num_questions=num_questions,
                 difficulty=_normalized_difficulty,
+                style_profile=style_profile,
             )
             logger.info("generate_mcqs_with_rag: LLM returned %d candidates", len(mcqs))
         except Exception as e:

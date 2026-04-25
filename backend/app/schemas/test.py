@@ -80,6 +80,7 @@ class TestGenerateRequest(BaseModel):
     num_questions: int = 15  # MVP: 1–20, default 15
     difficulty: Literal["EASY", "MEDIUM", "HARD"] = "MEDIUM"  # LLM must not decide
     export_result: bool = False  # When ENABLE_EXPORT=true, save MCQs to backend/exports/{test_id}.json
+    reference_qp_hash: str | None = None
 
     @field_validator("num_questions")
     @classmethod

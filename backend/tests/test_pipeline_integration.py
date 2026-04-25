@@ -54,7 +54,7 @@ def test_full_pipeline_chunking_to_rag_mock_llm(monkeypatch):
     ]
 
     class MockLLM:
-        def generate_mcqs(self, text_chunk, topic_slugs, num_questions=None, difficulty=None):
+        def generate_mcqs(self, text_chunk, topic_slugs, num_questions=None, difficulty=None, style_profile=None):
             return mock_mcqs, 100, 50
 
         def validate_mcq(self, mcq):

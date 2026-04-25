@@ -11,6 +11,7 @@ const apiMock = vi.hoisted(() => ({
   authRegister: vi.fn(),
   documentGet: vi.fn(),
   documentUpload: vi.fn(),
+  referenceQpUpload: vi.fn(),
   documentsList: vi.fn(),
   testGet: vi.fn(),
   testsGenerate: vi.fn(),

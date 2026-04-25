@@ -113,6 +113,8 @@ def get_llm_service_with_fallback():
             text_chunk: str,
             topic_slugs: list[str],
             num_questions: int | None = None,
+            difficulty: str | None = None,
+            style_profile: str | None = None,
         ) -> tuple[list[dict], int, int]:
             try:
                 return _call_with_retry(
@@ -120,6 +122,8 @@ def get_llm_service_with_fallback():
                     text_chunk,
                     topic_slugs,
                     num_questions,
+                    difficulty,
+                    style_profile,
                 )
             except Exception as e:
                 if not self._use_secondary and _is_retryable(e):
@@ -129,6 +133,8 @@ def get_llm_service_with_fallback():
                         text_chunk,
                         topic_slugs,
                         num_questions,
+                        difficulty,
+                        style_profile,
                     )
                 raise
 

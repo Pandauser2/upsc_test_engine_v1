@@ -164,6 +164,7 @@ def start_generation(
             "num_questions": data.num_questions,
             "difficulty": data.difficulty,
             "export_result": getattr(data, "export_result", False),
+            "reference_qp_hash": data.reference_qp_hash,
         },
     )
     db.add(test)

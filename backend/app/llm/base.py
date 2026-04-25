@@ -25,6 +25,8 @@ class LLMService(Protocol):
         text_chunk: str,
         topic_slugs: list[str],
         num_questions: int | None = None,
+        difficulty: str | None = None,
+        style_profile: str | None = None,
     ) -> tuple[list[dict], int, int]:
         """
         Generate MCQs from the given text (one chunk or full document).

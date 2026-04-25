@@ -125,6 +125,29 @@ def test_retry_guard_stops_after_max_retries(monkeypatch):
     assert llm.generate_mcqs.call_count <= 3
 
 
+def test_generate_passes_style_profile_to_llm(monkeypatch):
+    llm = Mock()
+    llm.generate_mcqs.return_value = ([_mk_mcq(i) for i in range(2)], 10, 20)
+    llm.validate_mcqs_batch.return_value = (
+        [{"is_valid": True, "quality_score": 0.8, "critique": "ok"} for _ in range(2)],
+        5,
+        6,
+    )
+    monkeypatch.setattr(svc, "chunk_text", lambda *args, **kwargs: [f"chunk-{i}" for i in range(30)])
+    monkeypatch.setattr(svc, "get_llm_service", lambda: llm)
+    monkeypatch.setattr(svc, "retrieve_relevant_chunks", lambda chunks, num_questions, topic_tags: chunks[:10])
+
+    svc.generate_mcqs_with_rag(
+        full_text="irrelevant",
+        topic_slugs=["polity"],
+        num_questions=2,
+        style_profile="sample style profile",
+    )
+    assert llm.generate_mcqs.call_count == 1
+    kwargs = llm.generate_mcqs.call_args.kwargs
+    assert kwargs.get("style_profile") == "sample style profile"
+
+
 def test_timer_stops_after_event_set(monkeypatch):
     calls = {"n": 0}
 
