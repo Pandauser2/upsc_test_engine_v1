@@ -1,11 +1,10 @@
 services:
   - type: web
     name: upsc-test-engine-v1-backend
-    runtime: python
+    runtime: docker
     plan: free
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -36,7 +35,7 @@ services:
       - key: MCQ_ESTIMATED_SECONDS_PER_QUESTION
         value: "8"
       - key: EMBEDDING_MODEL_PATH
-        value: ""
+        value: all-MiniLM-L6-v2
 
 databases:
   - name: upsc-test-engine-v1-db
