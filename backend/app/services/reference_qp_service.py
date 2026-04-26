@@ -10,8 +10,6 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
-import fitz
-
 logger = logging.getLogger(__name__)
 
 _STYLE_CACHE_MAX = 20
@@ -61,6 +59,11 @@ def cache_style_profile(qp_hash: str, profile: str) -> None:
 
 
 def _extract_qp_text(qp_pdf_bytes: bytes) -> str:
+    try:
+        import fitz
+    except Exception as e:  # pragma: no cover - environment specific
+        logger.warning("reference_qp: PyMuPDF import unavailable: %s", e)
+        return ""
     doc = fitz.open(stream=qp_pdf_bytes, filetype="pdf")
     pages: list[str] = []
     try:

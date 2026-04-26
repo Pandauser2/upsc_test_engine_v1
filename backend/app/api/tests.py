@@ -3,6 +3,7 @@ Tests API: generate (create test pending, enqueue job), list, get, PATCH test, P
 All scoped by current user id. On-read cleanup: stale generating tests are marked failed when user loads test/list.
 """
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -33,6 +34,31 @@ from app.jobs.tasks import run_generation, clear_one_stuck_test_if_stale, cancel
 from app.services.export_docx import build_docx
 
 router = APIRouter(prefix="/tests", tags=["tests"])
+
+
+def _enqueue_generation_job(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    """
+    Prefer Celery queue when available; otherwise run in a daemon thread.
+    This avoids request-scoped BackgroundTasks being dropped during churn.
+    """
+    try:
+        from app.jobs.celery_tasks import run_mcq_generation
+
+        if hasattr(run_mcq_generation, "delay"):
+            run_mcq_generation.delay(str(test_id), str(doc_id), str(user_id))
+            logger.info("enqueue_generation: queued via Celery test_id=%s", test_id)
+            return
+    except Exception as e:
+        logger.info("enqueue_generation: Celery unavailable, fallback to thread (%s)", e)
+
+    th = threading.Thread(
+        target=run_generation,
+        args=(test_id, doc_id, user_id),
+        daemon=True,
+        name=f"run-generation-{str(test_id)[:8]}",
+    )
+    th.start()
+    logger.info("enqueue_generation: started daemon thread test_id=%s", test_id)
 
 
 def _age_seconds(created_at: datetime) -> float:
@@ -171,7 +197,7 @@ def start_generation(
     db.commit()
     db.refresh(test)
     logger.info("POST /tests/generate: enqueueing run_generation test_id=%s doc_id=%s", test.id, doc_id)
-    background_tasks.add_task(run_generation, test.id, doc_id, current_user.id)
+    _enqueue_generation_job(test.id, doc_id, current_user.id)
     return _test_to_response(test)
 
 
