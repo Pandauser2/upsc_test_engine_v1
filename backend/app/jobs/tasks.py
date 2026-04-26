@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -29,6 +29,35 @@ def _get_candidate_count() -> int:
     return max(1, min(MAX_QUESTIONS, getattr(settings, "mcq_candidate_count", 4)))
 # Max 3 concurrent generation jobs
 _generation_semaphore = threading.BoundedSemaphore(3)
+
+
+def _run_with_timeout(
+    fn,
+    timeout_seconds: float,
+    *,
+    label: str,
+):
+    """
+    Run a potentially blocking function in a daemon thread with timeout.
+    Returns (ok, value_or_none, error_or_none).
+    """
+    result: dict[str, object] = {"value": None, "error": None}
+
+    def _target() -> None:
+        try:
+            result["value"] = fn()
+        except Exception as ex:  # pragma: no cover - defensive
+            result["error"] = ex
+
+    t = threading.Thread(target=_target, daemon=True, name=f"job-timebox-{label}")
+    t.start()
+    t.join(timeout=max(0.1, float(timeout_seconds)))
+    if t.is_alive():
+        logger.warning("run_generation: %s timed out after %.1fs", label, timeout_seconds)
+        return False, None, TimeoutError(f"{label} timed out")
+    if result["error"] is not None:
+        return False, None, result["error"]
+    return True, result["value"], None
 
 
 def _set_generation_progress(test_id: uuid.UUID, progress_mcq: int | None = None, total_mcq: int | None = None) -> None:
@@ -285,10 +314,32 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
             interval_seconds=float(estimated_per_q),
         )
 
+        def _heartbeat() -> None:
+            _db = SessionLocal()
+            try:
+                t = _db.query(GeneratedTest).filter(GeneratedTest.id == test_id).first()
+                if t:
+                    from datetime import datetime, timezone
+
+                    t.updated_at = datetime.now(timezone.utc)
+                    _db.commit()
+            except Exception as hb_ex:
+                logger.warning("run_generation: heartbeat failed: %s", hb_ex)
+            finally:
+                _db.close()
+
         from app.services.chunking_service import chunk_text
         from app.services.reference_qp_service import get_cached_style_profile
         mode = getattr(settings, "chunk_mode", "semantic")
+        chunk_timeout = float(getattr(settings, "generation_chunk_timeout_seconds", 20))
+        style_timeout = float(getattr(settings, "style_lookup_timeout_seconds", 3))
         style_profile: str | None = None
+        _heartbeat()
+        logger.info(
+            "run_generation: starting chunk/style prep mode=%s reference_qp=%s",
+            mode,
+            bool(reference_qp_hash),
+        )
         if reference_qp_hash:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 chunk_future = executor.submit(
@@ -299,15 +350,53 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
                     getattr(settings, "chunk_overlap_fraction", 0.2),
                 )
                 style_future = executor.submit(get_cached_style_profile, reference_qp_hash)
-                chunks_for_outline = chunk_future.result()
-                style_profile = style_future.result()
+                try:
+                    chunks_for_outline = chunk_future.result(timeout=max(1.0, chunk_timeout))
+                except FuturesTimeoutError:
+                    logger.warning(
+                        "run_generation: semantic chunking timed out after %.1fs; falling back to fixed",
+                        chunk_timeout,
+                    )
+                    chunks_for_outline = chunk_text(
+                        extracted_text,
+                        mode="fixed",
+                        chunk_size=getattr(settings, "chunk_size", 1500),
+                        overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
+                    )
+                try:
+                    style_profile = style_future.result(timeout=max(0.5, style_timeout))
+                except FuturesTimeoutError:
+                    logger.warning("run_generation: style cache lookup timed out after %.1fs; continuing without style", style_timeout)
+                    style_profile = None
         else:
-            chunks_for_outline = chunk_text(
-                extracted_text,
-                mode=mode,
-                chunk_size=getattr(settings, "chunk_size", 1500),
-                overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
+            ok, chunk_value, chunk_err = _run_with_timeout(
+                lambda: chunk_text(
+                    extracted_text,
+                    mode=mode,
+                    chunk_size=getattr(settings, "chunk_size", 1500),
+                    overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
+                ),
+                chunk_timeout,
+                label="chunk_text",
             )
+            if not ok:
+                logger.warning(
+                    "run_generation: chunk_text failed/timed out (%s); falling back to fixed mode",
+                    chunk_err,
+                )
+                chunks_for_outline = chunk_text(
+                    extracted_text,
+                    mode="fixed",
+                    chunk_size=getattr(settings, "chunk_size", 1500),
+                    overlap_fraction=getattr(settings, "chunk_overlap_fraction", 0.2),
+                )
+            else:
+                chunks_for_outline = chunk_value
+        _heartbeat()
+        logger.info("run_generation: chunk/style prep done chunks=%s style=%s", len(chunks_for_outline or []), bool(style_profile))
+        if not chunks_for_outline:
+            _mark_failed(db, test, "Chunking produced no usable chunks.")
+            return
         num_chunks = len(chunks_for_outline or [])
         min_chunks = getattr(settings, "rag_min_chunks_for_global", 9)
         use_global_rag = getattr(settings, "use_global_rag", False)
@@ -346,20 +435,9 @@ def run_generation(test_id: uuid.UUID, doc_id: uuid.UUID, user_id: uuid.UUID) ->
         test.generation_metadata = meta
         db.commit()
 
-        def _heartbeat() -> None:
-            _db = SessionLocal()
-            try:
-                t = _db.query(GeneratedTest).filter(GeneratedTest.id == test_id).first()
-                if t:
-                    from datetime import datetime, timezone
-                    t.updated_at = datetime.now(timezone.utc)
-                    _db.commit()
-            except Exception as hb_ex:
-                logger.warning("run_generation: heartbeat failed: %s", hb_ex)
-            finally:
-                _db.close()
-
         from app.services.mcq_generation_service import generate_mcqs_with_rag, select_mcqs_for_persistence
+        _heartbeat()
+        logger.info("run_generation: calling generate_mcqs_with_rag use_rag=%s chunks=%s", use_rag_flag, num_chunks)
         t_gen_start = time.monotonic()
         all_mcqs, _scores, total_inp, total_out, _ = generate_mcqs_with_rag(
             extracted_text,
